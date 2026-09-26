@@ -304,6 +304,11 @@ describe('ApiClient: retries', () => {
     await expect(client.bundles.delete(PARAMS)).resolves.toBeUndefined();
   });
 
+  it('reports not_found after a 503: nothing was deleted then (T46)', async () => {
+    const { client } = fakeServer([empty(503), apiError(404, 'not_found')]);
+    await expect(client.bundles.delete(PARAMS)).rejects.toMatchObject({ code: 'not_found' });
+  });
+
   it('still reports not_found when the first try finds nothing', async () => {
     const { client } = fakeServer([apiError(404, 'not_found')]);
     await expect(client.bundles.delete(PARAMS)).rejects.toMatchObject({ code: 'not_found' });

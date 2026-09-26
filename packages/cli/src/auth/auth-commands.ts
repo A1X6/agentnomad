@@ -1,4 +1,4 @@
-import { DEFAULT_KDF_PARAMS, UsernameSchema } from '@agentnomad/contracts';
+import { DEFAULT_KDF_PARAMS, UsernameSchema, WRONG_PASSWORD_MESSAGE } from '@agentnomad/contracts';
 import {
   DATA_KEY_BYTES,
   DecryptionError,
@@ -290,7 +290,7 @@ export function createAuthCommands(
       } catch (error) {
         if (error instanceof ApiError && error.code === 'unauthorized') {
           // "Wrong password" keeps the login; any other 401 means the session itself ended.
-          if (error.message.startsWith('Wrong password')) {
+          if (error.message === WRONG_PASSWORD_MESSAGE) {
             throw new Error('Wrong username or password. Nothing was deleted.', { cause: error });
           }
           await clearLocalSession(secrets);

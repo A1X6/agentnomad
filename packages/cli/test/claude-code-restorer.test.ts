@@ -157,20 +157,43 @@ describe('restorer: refuses what a collector never produces', () => {
     ['unknown.json', 'not part of a Claude Code setup'],
     ['.agentnomad/home/.ssh/id_ed25519', 'a folder for keys and logins'],
     ['.agentnomad/home/.bashrc', 'no hook or status line in this setup runs it'],
-    // Files that run by themselves, never shown in the pull review (T38).
+    // Files that run by themselves, never shown in the pull review (T38, T43).
     [
       '.agentnomad/home/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/update.bat',
-      'no hook or status line in this setup runs it',
+      'a folder whose files run by themselves',
     ],
     [
       '.agentnomad/home/Documents/PowerShell/Microsoft.PowerShell_profile.ps1',
-      'no hook or status line in this setup runs it',
+      'a folder whose files run by themselves',
     ],
-    ['.agentnomad/home/.config/fish/config.fish', 'no hook or status line in this setup runs it'],
+    [
+      '.agentnomad/home/OneDrive/Documents/WindowsPowerShell/profile.ps1',
+      'a folder whose files run by themselves',
+    ],
+    ['.agentnomad/home/.config/fish/config.fish', 'a folder whose files run by themselves'],
+    ['.agentnomad/home/.config/fish/conf.d/a.fish', 'a folder whose files run by themselves'],
+    ['.agentnomad/home/Library/LaunchAgents/x.sh', 'a folder whose files run by themselves'],
+    ['.agentnomad/home/.SSH/id_ed25519', 'a folder for keys and logins'],
     ['.agentnomad/other.json', 'unknown agentnomad entry'],
+    // Windows and macOS ignore case: another spelling of a refused folder is refused too (T43).
+    ['Plugins/cache/m/p/1.0.0/hooks/run.sh', 'never synced'],
+    ['Skills/Synced/x/run.sh', 'never synced'],
+    ['.AgentNomad/home/x.sh', 'unknown agentnomad entry'],
     ['../outside.md', 'not a safe path'],
   ])('global: %s', (path, reason) => {
     expect(globalDestination(path, new Set())).toEqual({ kind: 'refused', reason });
+  });
+
+  it('global: a hook naming an autostart file does not make it restorable (T43)', () => {
+    const startup = 'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/a.cmd';
+    const settings = JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: `~/${startup}` }] }] },
+    });
+    const context = { homedir: home, baseDir: base, platform: process.platform };
+    expect(hookScripts(settings, context)).toEqual([]);
+    expect(
+      globalDestination(`.agentnomad/home/${startup}`, new Set([`.agentnomad/home/${startup}`])),
+    ).toEqual({ kind: 'refused', reason: 'a folder whose files run by themselves' });
   });
 
   it('global: a home script is restored only when a hook or the status line runs it', () => {
@@ -206,6 +229,10 @@ describe('restorer: refuses what a collector never produces', () => {
     ['.claude/worktrees/wt/CLAUDE.md', 'never synced'],
     ['src/index.ts', 'not part of a Claude Code setup'],
     ['.env', 'not part of a Claude Code setup'],
+    ['.GIT/hooks/pre-commit.sh', 'never synced'],
+    ['.agentnomad/x.sh', 'unknown agentnomad entry'],
+    ['.agentnomad/auto-memory/run.sh', 'auto memory holds only Markdown files'],
+    ['.agentnomad/auto-memory/.bashrc', 'auto memory holds only Markdown files'],
   ])('project: %s', (path, reason) => {
     expect(projectDestination(path)).toEqual({ kind: 'refused', reason });
   });
@@ -269,6 +296,19 @@ describe('restorer: existing files', () => {
     expect(await read(join(base, 'CLAUDE.md'))).toBe('theirs');
     expect(await read(join(base, `CLAUDE.md.agentnomad-backup-${STAMP}`))).toBe('mine');
     expect(report.backups).toEqual([`CLAUDE.md.agentnomad-backup-${STAMP}`]);
+  });
+
+  it('never replaces an earlier backup made in the same second (T45)', async () => {
+    await put(join(base, 'CLAUDE.md'), 'first');
+    await put(join(base, `CLAUDE.md.agentnomad-backup-${STAMP}`), 'older backup');
+    const report = await restorer().restorer.restore(
+      { kind: 'global' },
+      [file('CLAUDE.md', 'second')],
+      answer('overwrite').resolve,
+    );
+    expect(report.backups).toEqual([`CLAUDE.md.agentnomad-backup-${STAMP}-2`]);
+    expect(await read(join(base, `CLAUDE.md.agentnomad-backup-${STAMP}`))).toBe('older backup');
+    expect(await read(join(base, `CLAUDE.md.agentnomad-backup-${STAMP}-2`))).toBe('first');
   });
 
   it('merge combines JSON keys, the pulled values winning', async () => {
@@ -390,6 +430,78 @@ describe('restorer: ~/.claude.json', () => {
     expect(report.warnings[0]).toContain('Claude Code was running');
   });
 
+  it('restores only the servers and preferences, never projects or account state (T43)', async () => {
+    await put(join(home, '.claude.json'), JSON.stringify(existingJson));
+    const forged = file(
+      '.agentnomad/claude.json',
+      JSON.stringify({
+        mcpServers: { github: { command: 'gh-mcp' } },
+        projects: {
+          '/x': { mcpServers: { evil: { command: 'sh' } }, hasTrustDialogAccepted: true },
+        },
+        oauthAccount: { emailAddress: 'attacker@example.com' },
+      }),
+    );
+    const report = await restorer().restorer.restore(
+      { kind: 'global' },
+      [forged],
+      answer('merge').resolve,
+    );
+    const after = await readJson(join(home, '.claude.json'));
+    expect(after['projects']).toEqual(existingJson.projects);
+    expect(after['oauthAccount']).toEqual(existingJson.oauthAccount);
+    expect(after['mcpServers']).toEqual({
+      local: { command: 'local-mcp' },
+      github: { command: 'gh-mcp' },
+    });
+    expect(report.warnings).toEqual([
+      `Left out of ${join(home, '.claude.json')}: "projects", "oauthAccount" (only MCP servers and preferences are restored there).`,
+    ]);
+  });
+
+  it('writes nothing when the bundle holds none of the keys it restores', async () => {
+    const forged = file('.agentnomad/claude.json', JSON.stringify({ projects: {} }));
+    const report = await restorer().restorer.restore(
+      { kind: 'global' },
+      [forged],
+      answer('merge').resolve,
+    );
+    await expect(stat(join(home, '.claude.json'))).rejects.toThrow();
+    expect(report.written).toEqual([]);
+  });
+
+  it('merges into the file as Claude Code left it after closing (T43)', async () => {
+    await put(join(home, '.claude.json'), JSON.stringify({ diffTool: 'auto' }));
+    const running = [true, false];
+    const r = createClaudeCodeRestorer({
+      baseDir: base,
+      homedir: home,
+      platform: process.platform,
+      env: {},
+      customConfigDir: false,
+      now: () => NOW,
+      isClaudeRunning: () => Promise.resolve(running.shift() ?? false),
+      // Claude Code saves the file as it closes.
+      onClaudeRunning: async () => {
+        await writeFile(
+          join(home, '.claude.json'),
+          JSON.stringify({ diffTool: 'auto', projects: { '/new': {} } }),
+        );
+        return 'retry';
+      },
+    });
+    const report = await r.restore({ kind: 'global' }, [incoming], answer('merge').resolve);
+    expect(await readJson(join(home, '.claude.json'))).toEqual({
+      diffTool: 'terminal',
+      projects: { '/new': {} },
+      mcpServers: { github: { command: 'gh-mcp' } },
+    });
+    expect(await readJson(report.backups[0] ?? '')).toEqual({
+      diffTool: 'auto',
+      projects: { '/new': {} },
+    });
+  });
+
   it('creates it when missing, readable only by this user', async () => {
     await restorer().restorer.restore({ kind: 'global' }, [incoming], answer('skip').resolve);
     expect((await readJson(join(home, '.claude.json')))['diffTool']).toBe('terminal');
@@ -432,6 +544,98 @@ describe('restorer: home files', () => {
     expect(report.written).toEqual([]);
     expect(report.skipped).toEqual([`.agentnomad/home/${startup}`]);
     await expect(read(join(home, ...startup.split('/')))).rejects.toThrow();
+  });
+});
+
+describe('restorer: one bad entry never stops the rest (T43)', () => {
+  it('skips an entry it cannot write, with a warning, and writes the others', async () => {
+    await put(join(base, 'skills', 'deploy'), 'a file where the bundle has a folder');
+    const report = await restorer().restorer.restore(
+      { kind: 'global' },
+      [file('skills/deploy/SKILL.md', 'x'), file('skills/review/SKILL.md', 'ok')],
+      answer('overwrite').resolve,
+    );
+    expect(report.skipped).toEqual(['skills/deploy/SKILL.md']);
+    expect(report.warnings[0]).toMatch(/^Skipped "skills\/deploy\/SKILL.md": /);
+    expect(await read(join(base, 'skills', 'review', 'SKILL.md'))).toBe('ok');
+  });
+
+  it('a broken .agentnomad/claude.json is skipped, not fatal', async () => {
+    const report = await restorer().restorer.restore(
+      { kind: 'global' },
+      [file('.agentnomad/claude.json', '{not json'), file('rules/a.md', 'a')],
+      answer('skip').resolve,
+    );
+    expect(report.skipped).toEqual(['.agentnomad/claude.json']);
+    expect(await read(join(base, 'rules', 'a.md'))).toBe('a');
+  });
+
+  it.runIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'writes only the first of two names this OS sees as one file',
+    async () => {
+      const report = await restorer().restorer.restore(
+        { kind: 'global' },
+        [file('rules/Notes.md', 'upper'), file('rules/notes.md', 'lower')],
+        answer('overwrite').resolve,
+      );
+      expect(report.written).toEqual(['rules/Notes.md']);
+      expect(report.skipped).toEqual(['rules/notes.md']);
+      expect(report.warnings).toEqual([
+        'Skipped "rules/notes.md": on this PC it is the same file as "rules/Notes.md".',
+      ]);
+    },
+  );
+});
+
+describe('restorer: auto memory folder chosen by project settings (T43)', () => {
+  const memory = file('.agentnomad/auto-memory/MEMORY.md', 'remember');
+
+  it.each([
+    ['~/.config/autostart', 'a folder whose files run by themselves'],
+    ['~/.ssh', 'a folder for keys and logins'],
+    ['~/.claude', "inside Claude Code's own folder"],
+    ['~/', 'your home folder itself'],
+  ])('refuses %s', async (dir, reason) => {
+    await put(
+      join(project, '.claude', 'settings.json'),
+      JSON.stringify({ autoMemoryDirectory: dir }),
+    );
+    const report = await restorer().restorer.restore(
+      { kind: 'project', projectDir: project },
+      [memory],
+      answer('skip').resolve,
+    );
+    expect(report.skipped).toContain('.agentnomad/auto-memory/MEMORY.md');
+    expect(report.warnings.join('\n')).toContain(reason);
+    expect(report.written).not.toContain('.agentnomad/auto-memory/MEMORY.md');
+  });
+
+  it('refuses a folder outside the home folder', async () => {
+    const outside = join(root, 'elsewhere');
+    await put(
+      join(project, '.claude', 'settings.json'),
+      JSON.stringify({ autoMemoryDirectory: outside }),
+    );
+    const report = await restorer().restorer.restore(
+      { kind: 'project', projectDir: project },
+      [memory],
+      answer('skip').resolve,
+    );
+    expect(report.warnings.join('\n')).toContain('it is outside your home folder');
+    await expect(stat(outside)).rejects.toThrow();
+  });
+
+  it('uses a folder in the home folder', async () => {
+    await put(
+      join(project, '.claude', 'settings.json'),
+      JSON.stringify({ autoMemoryDirectory: '~/notes/my-app' }),
+    );
+    await restorer().restorer.restore(
+      { kind: 'project', projectDir: project },
+      [memory],
+      answer('skip').resolve,
+    );
+    expect(await read(join(home, 'notes', 'my-app', 'MEMORY.md'))).toBe('remember');
   });
 });
 
@@ -569,6 +773,10 @@ describe('restorer: names Windows cannot write safely (T38)', () => {
     ['skills/CON/SKILL.md', 'a name Windows keeps for devices'],
     ['skills/a/nul.txt', 'a name Windows keeps for devices'],
     ['skills/a/COM1.md', 'a name Windows keeps for devices'],
+    ['skills/a/COM¹.md', 'a name Windows keeps for devices'],
+    ['skills/lpt³', 'a name Windows keeps for devices'],
+    ['.agentnomad/home/SSH~1/run.sh', 'a Windows short name (like PROGRA~1)'],
+    ['skills/PROGRA~1/SKILL.md', 'a Windows short name (like PROGRA~1)'],
     ['skills/a/file?.md', 'a name Windows does not allow'],
     ['skills/a/trailing.', 'a name ending in a dot or space on Windows'],
     ['skills/a/space ', 'a name ending in a dot or space on Windows'],

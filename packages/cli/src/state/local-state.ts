@@ -5,13 +5,20 @@ import { posix, win32 } from 'node:path';
 import { ProjectNameSchema } from '@agentnomad/contracts';
 import * as z from 'zod';
 
+/** Suffix of the note that a pull left out declined commands (T46). */
+const PARTIAL = '#partial';
+
 /** File name of the local state inside the agentnomad config folder. */
 export const STATE_FILE = 'state.json';
 
 const ServerStateSchema = z.strictObject({
   /** Project folder on this PC → the name it is saved under (T33 folder map). */
   projects: z.record(z.string(), ProjectNameSchema),
-  /** `<agent>/<scopeKey>` → the revision this PC last pushed or pulled. */
+  /**
+   * `<agent>/<scopeKey>` → the revision this PC last pushed or pulled. A pull that left out
+   * commands the user declined is also noted as `<agent>/<scopeKey>#partial` (T46); kept in
+   * this map so older versions still read the file.
+   */
   revisions: z.record(z.string(), z.int().min(1)),
 });
 
@@ -41,7 +48,15 @@ export interface LocalState {
   projectNameFor(folder: string): Promise<string | null>;
   rememberProject(folder: string, name: string): Promise<void>;
   revisionOf(agent: string, scopeKey: string): Promise<number | null>;
-  setRevision(agent: string, scopeKey: string, revision: number): Promise<void>;
+  /** `partial`: the pull left out commands the user declined (T46). */
+  setRevision(
+    agent: string,
+    scopeKey: string,
+    revision: number,
+    options?: { partial?: boolean },
+  ): Promise<void>;
+  /** Whether this PC's last pull of the setup left out commands the user declined (T46). */
+  isPartial(agent: string, scopeKey: string): Promise<boolean>;
   /** Every revision this PC knows, by `<agent>/<scopeKey>` (T35 status). */
   knownRevisions(): Promise<Readonly<Record<string, number>>>;
   /** Forgets one setup (after it was deleted on the server). */
@@ -116,18 +131,31 @@ export function createLocalState(options: LocalStateOptions): LocalState {
     async revisionOf(agent, scopeKey) {
       return (await server())?.revisions[`${agent}/${scopeKey}`] ?? null;
     },
-    async setRevision(agent, scopeKey, revision) {
-      await update((state) => {
-        state.revisions[`${agent}/${scopeKey}`] = revision;
-      });
-    },
-    async knownRevisions() {
-      return (await server())?.revisions ?? {};
-    },
-    async forgetRevision(agent, scopeKey) {
+    async setRevision(agent, scopeKey, revision, setOptions = {}) {
+      const key = `${agent}/${scopeKey}`;
       await update((state) => {
         state.revisions = Object.fromEntries(
-          Object.entries(state.revisions).filter(([key]) => key !== `${agent}/${scopeKey}`),
+          Object.entries(state.revisions).filter(([name]) => name !== `${key}${PARTIAL}`),
+        );
+        state.revisions[key] = revision;
+        if (setOptions.partial === true) state.revisions[`${key}${PARTIAL}`] = 1;
+      });
+    },
+    async isPartial(agent, scopeKey) {
+      return (await server())?.revisions[`${agent}/${scopeKey}${PARTIAL}`] !== undefined;
+    },
+    async knownRevisions() {
+      return Object.fromEntries(
+        Object.entries((await server())?.revisions ?? {}).filter(([key]) => !key.endsWith(PARTIAL)),
+      );
+    },
+    async forgetRevision(agent, scopeKey) {
+      const key = `${agent}/${scopeKey}`;
+      await update((state) => {
+        state.revisions = Object.fromEntries(
+          Object.entries(state.revisions).filter(
+            ([name]) => name !== key && name !== `${key}${PARTIAL}`,
+          ),
         );
       });
     },

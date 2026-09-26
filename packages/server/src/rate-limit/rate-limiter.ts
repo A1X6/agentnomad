@@ -47,4 +47,14 @@ export const RATE_LIMITS = {
    * A pause, never a lockout, so nobody can lock another user out for long.
    */
   failedLoginsPerAccount: { name: 'login-fail', limit: 10, windowSeconds: 15 * 60 },
+  /**
+   * Account deletes with a wrong password, per account (T47): kept apart from logins, so
+   * someone guessing logins for a username cannot stop its owner from deleting the account.
+   */
+  failedDeletesPerAccount: { name: 'delete-fail', limit: 10, windowSeconds: 15 * 60 },
+  /**
+   * Saves and deletes of setups per account (T47): far more than anyone pushes by hand, few
+   * enough that one account cannot churn the database.
+   */
+  writesPerAccount: { name: 'bundle-write', limit: 120, windowSeconds: 60 * 60 },
 } as const satisfies Record<string, RateLimitRule>;

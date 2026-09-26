@@ -5,6 +5,7 @@ import * as z from 'zod';
 import type { CollectedFile } from '../adapter.ts';
 import type { FileGatherer } from './file-gathering.ts';
 import { RESERVED_DIR } from './global-paths.ts';
+import { runnableInMarkdown } from './runnable-markdown.ts';
 
 /**
  * Skills from the user's claude.ai account (T42). Claude Code downloads them into
@@ -112,9 +113,6 @@ export async function collectAccountSkills(
   return found;
 }
 
-/** A skill line Claude Code runs as a shell command in a local skill: `` !`command` ``. */
-const SHELL_INJECTION = /!`[^`\n]+`/;
-
 export interface AccountSkillPlan {
   /** Skills that can be added here, and whether each runs commands as a local skill. */
   readonly toAdd: readonly { readonly name: string; readonly runsCommands: boolean }[];
@@ -155,7 +153,7 @@ export function planAccountSkills(
     const runsCommands = skillFiles.some(
       (file) =>
         file.path.toLowerCase().endsWith('.md') &&
-        SHELL_INJECTION.test(new TextDecoder().decode(file.content)),
+        runnableInMarkdown(new TextDecoder().decode(file.content)).length > 0,
     );
     toAdd.push({ name, runsCommands });
     for (const file of skillFiles) {

@@ -158,7 +158,8 @@ A bundle is one agent's setup for one scope, as plain data before encryption:
 | `files`         | Every file: a relative forward-slash path, `executable`, and content as UTF-8 text or base64.                   |
 
 **Portable paths.** In text files, the user's home folder is replaced by `{{HOME}}` on push
-and by the other PC's home on pull, so `C:\Users\ana\.claude\hooks\check.sh` in a hook
+(a `{{HOME}}` already written in a file is stored as `{{HOME\}}` and comes back unchanged)
+and by the other PC's home on pull (with backslashes in `.bat` and `.cmd` files on Windows), so `C:\Users\ana\.claude\hooks\check.sh` in a hook
 becomes `/Users/ana/.claude/hooks/check.sh` on a Mac. Paths inside the bundle are relative
 to the agent's base folder (global) or the project root (project), never absolute and never
 with `..`.
@@ -215,13 +216,18 @@ sequenceDiagram
    offered as a project.
 3. Choose whether to include memory (`--memory` / `--no-memory`).
 4. Show organization-managed settings and files the adapter does not know yet.
-5. The adapter **collects** the files; the user may add saved environment values.
+5. The adapter **collects** the files; the user may add saved environment values. Links
+   into folders for keys, links out of a project and files over 10 MB are left out, and push
+   says so. Every setup is collected and every question asked before the first upload.
 6. Paths are made portable, the bundle is built, compressed and **encrypted for the exact
    revision it will become** (the one this PC last knew, plus one).
 7. Upload with that expected revision. If another PC saved a newer copy, the server refuses
    (`revision_conflict`): the user is asked whether to replace it (with `--yes`: never), and
    a replacement is encrypted again for the new revision.
 8. Remember the new revision for this PC.
+
+If this PC's last pull of a setup left out commands the user declined, pushing it would drop
+them for every PC: push asks first, and `--yes` skips it with a note.
 
 ### Pull
 
@@ -302,14 +308,32 @@ file is a one-line change there:
 
 **Restore rules** (`restore-rules.ts`): a file is written only if a collector could have
 produced it. A home-folder file must be a known tool's settings or a script the setup's
-own hooks or status line run, so a bundle cannot drop a file that runs by itself (a Startup
-folder entry, a shell profile). On Windows, names with `:`, device names and trailing dots
-are refused. `~/.claude.json` is only ever merged, with a backup, and is skipped while
-Claude Code is running (it rewrites the file while open).
+own hooks or status line run, and never in a folder whose files run by themselves (Startup,
+`.config/autostart`, `Library/LaunchAgents`, fish and PowerShell profile folders), so a
+bundle cannot drop a file that runs by itself. Refusals ignore case. On Windows, names with
+`:`, device names, trailing dots and 8.3 short names are refused. Two entries that differ
+only in case or Unicode form are one file on Windows and macOS: only the first is written. An
+entry that cannot be written is skipped with a warning; the rest continue. `~/.claude.json`
+is only ever merged, with a backup: only `mcpServers` and the preference keys, never
+`projects` or account state. It is skipped while Claude Code is running (it rewrites the
+file while open) and read again once Claude Code is closed. Auto memory is Markdown only, and
+a folder chosen by the project's `autoMemoryDirectory` is used only inside the home folder
+and outside refused folders (`auto-memory.ts`).
 
-**Review of runnable things** (`command-review.ts`): hooks, the status line, MCP servers
-and the scripts they run that are new or changed compared with this PC are listed before
-anything is written.
+**Review of runnable things** (`command-review.ts`): everything Claude Code's docs say it
+runs, when new or changed compared with this PC, is listed before anything is written: hooks
+(commands, and `http` hooks that send data to an address), the status line, settings that
+run a command (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`,
+`otelHeadersHelper`, `fileSuggestion`), loader variables in a settings `env` block
+(`NODE_OPTIONS`, `LD_PRELOAD`, …), `bypassPermissions` in global settings and
+`enableAllProjectMcpServers`, MCP servers (the whole definition is compared, so a new `env`
+or `headersHelper` shows), scripts that commands here or in the bundle run and the scripts
+next to them, known tool settings (ccstatusline), and skill, command and subagent files with
+commands that run by themselves (`runnable-markdown.ts`: a `` !`command` `` placeholder, a
+` ```! ` block, frontmatter `hooks`). Commands written as instructions are never flagged.
+Declining skips the files that hold them. Saved environment values that make programs load
+code need their own yes, and `--yes` alone never adds them. Everything printed from a bundle
+or the server goes through `printable`, so escape sequences are shown, never acted on.
 
 **claude.ai skills (T42, opt-in):** Claude Code downloads the skills of the user's claude.ai
 account into `skills/synced/<account>/` and manages that folder; agentnomad never writes
@@ -327,7 +351,8 @@ own question; programs that hooks start and npm installed are offered with
 `npm install -g name@version`.
 
 **Keeping up with Claude Code:** files Claude Code adds that the data file does not know
-are reported on push; the Claude Code version is stamped in every bundle; and a weekly
+are reported on push (a folder holding a script the hooks or status line run is not: push saves
+that script); the Claude Code version is stamped in every bundle; and a weekly
 drift check (`.github/workflows/drift-check.yml`) compares the data file with the newest
 Claude Code. It reads the official
 [.claude directory docs](https://code.claude.com/docs/en/claude-directory), runs a fresh
@@ -365,18 +390,25 @@ pseudonyms). Keeping bytes apart from metadata means `list` never reads cipherte
 upload is stored first, then the revision check switches the pointer, then the old file is
 deleted, so two PCs saving at once can never overwrite or delete each other's file.
 
-**Limits and logs:** 30 auth requests per minute per IP, 5 registrations per hour per IP,
-10 failed logins or account deletes per account per 15 minutes; `429` with `Retry-After`.
-Logs are one JSON line per request with a request id, never headers, bodies or query
-strings. There are no CORS headers and no cookies.
+**Limits and logs:** 30 auth requests per minute per IP, 5 registrations per hour per IP
+(an IPv6 address counts by its /64), 10 failed logins per account and 10 wrong-password
+account deletes per account per 15 minutes (counted before the check, so parallel guesses
+cannot slip past), 120 saves and deletes per account per hour; `429` with `Retry-After`.
+Each account keeps at most 100 setups and 50 MB of encrypted bytes (checked before storing
+anything and again inside the save's transaction, with the user row locked); over it,
+`413 payload_too_large` says which limit. The visitor's IP is Cloudflare's
+`CF-Connecting-IP` (`True-Client-IP` when that is missing). About one save in 50 also deletes
+files no setup points to that are over an hour old. Logs are one JSON line per request with
+a request id, never headers, bodies or query strings; a failed query logs its SQL text, never
+its parameters. There are no CORS headers and no cookies.
 
 ## 9. What the CLI keeps on a PC
 
-| What                         | Where                                                                                                                                 | Why                                                                                                                                                        |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Session token and data key   | OS keychain: Windows Credential Manager, macOS Keychain, Linux Secret Service. Service `agentnomad`, account `<secret>@<server host>` | So later commands work without the password; one entry per server                                                                                          |
-| The same, without a keychain | `%APPDATA%\agentnomad\secrets.json` or `~/.config/agentnomad/secrets.json`, readable only by the user (600 in a 700 folder)           | Servers, WSL, SSH sessions; the CLI says when it is used                                                                                                   |
-| Local state                  | `state.json` in the same folder                                                                                                       | Which name each project folder was saved under, and the last revision this PC pushed or pulled of each setup (for conflicts, `status` and rollback checks) |
+| What                         | Where                                                                                                                                                             | Why                                                                                                                                                        |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session token and data key   | OS keychain: Windows Credential Manager, macOS Keychain, Linux Secret Service. Service `agentnomad`, account `<secret>@<server host>`                             | So later commands work without the password; one entry per server                                                                                          |
+| The same, without a keychain | `%APPDATA%\agentnomad\secrets.json` or `~/.config/agentnomad/secrets.json`, readable only by the user (600 in a 700 folder; on Windows an ACL for this user only) | Servers, WSL, SSH sessions; the CLI says when it is used. A login saved there while the keychain failed is moved into it once it works again               |
+| Local state                  | `state.json` in the same folder                                                                                                                                   | Which name each project folder was saved under, and the last revision this PC pushed or pulled of each setup (for conflicts, `status` and rollback checks) |
 
 `AGENTNOMAD_API_URL` points the CLI at another server (https, or http for localhost).
 
@@ -384,7 +416,9 @@ strings. There are no CORS headers and no cookies.
 
 When stdin or stdout is not a terminal, the CLI swaps its prompter for one that never asks:
 any question the flags leave open stops the command with exit code 1 and names the flags to
-add. Every command can be scripted:
+add. Push and pull look for such questions before they change anything: pull downloads and
+reviews every setup and checks for files that differ and missing environment values first;
+push collects every setup and compares revisions with the server first. Every command can be scripted:
 
 ```sh
 echo "$PASSWORD" | agentnomad login --username me --password-stdin
@@ -410,12 +444,15 @@ the e2e steps with the installed `agentnomad` command. Actions are pinned by com
 
 **The npm package.** `packages/cli/scripts/build-release.ts` bundles our own code (cli,
 core, contracts) into one readable file with esbuild and writes `packages/cli/release/`:
-that file, a `package.json` naming every library as a normal dependency, the README and
+that file, a `package.json` naming every library as a normal dependency, an
+`npm-shrinkwrap.json` fixing every indirect version too (so users install the tree the release
+tested), the README and
 the license. The build fails if anything but our own source is bundled or a library is
 not declared. **Releases:** pushing a tag `vX.Y.Z` on `main` runs
 `.github/workflows/release.yml`: build and test on every OS, install and run the packed
 package, wait for the owner's approval, publish the tested tarball through npm trusted
-publishing with provenance (no npm token exists), then check `npx agentnomad` on every OS.
+publishing with provenance (no npm token exists), then check `npx agentnomad` on every OS. The release starts only for a commit
+whose CI run on `main` passed, and verifies on Node 22.13 and 24.
 
 Deployment: Render builds `main` from `render.yaml` after CI; database migrations
 (`packages/server/drizzle`) are run by hand with the direct connection string, and the API

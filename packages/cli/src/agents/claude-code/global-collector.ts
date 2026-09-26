@@ -6,6 +6,7 @@ import type { CollectedFile, CollectOptions, Collector, ScopeTarget } from '../a
 import {
   commandsInSettings,
   createFileGatherer,
+  type FileGatherer,
   jsonFile,
   programOf,
   uniqueByPath,
@@ -53,12 +54,14 @@ const isNeverSynced = (bundlePath: string) =>
 
 /** A Claude Code global collector for one PC (T25). Project scope is T26. */
 export function createClaudeCodeGlobalCollector(options: GlobalCollectorOptions): Collector {
-  const files = createFileGatherer(options.platform);
-  const { path } = files;
+  const { path } = createFileGatherer(options.platform);
   const { baseDir, homedir } = options;
 
   /** Script files that hooks and the status line run, if they are in the home folder. */
-  async function hookScriptFiles(settingsJson: string): Promise<CollectedFile[]> {
+  async function hookScriptFiles(
+    files: FileGatherer,
+    settingsJson: string,
+  ): Promise<CollectedFile[]> {
     const found: CollectedFile[] = [];
     for (const script of hookScripts(settingsJson, options)) {
       const file = await files.readIfFile(script.nativePath, script.bundlePath);
@@ -71,7 +74,7 @@ export function createClaudeCodeGlobalCollector(options: GlobalCollectorOptions)
    * For each program the commands run: its known settings file (e.g. ccstatusline's) and,
    * unless it runs through npx, what it is and how it was installed, so pull can check it.
    */
-  async function programs(settingsJson: string): Promise<CollectedFile[]> {
+  async function programs(files: FileGatherer, settingsJson: string): Promise<CollectedFile[]> {
     const found: CollectedFile[] = [];
     const programsFound = new Map<string, ProgramInfo>();
     for (const command of commandsInSettings(settingsJson)) {
@@ -136,6 +139,12 @@ export function createClaudeCodeGlobalCollector(options: GlobalCollectorOptions)
         throw new Error('The global collector only collects the global setup');
       }
       const found: CollectedFile[] = [];
+      // Links into folders for keys and logins are never followed, and huge files are left
+      // out (T45); the user's own links elsewhere (a dotfiles repo) still come along.
+      const files = createFileGatherer(options.platform, {
+        homedir,
+        ...(collectOptions.onSkipped && { onSkipped: collectOptions.onSkipped }),
+      });
 
       for (const name of GLOBAL_FILES) {
         const file = await files.readIfFile(path.join(baseDir, name), name);
@@ -152,7 +161,7 @@ export function createClaudeCodeGlobalCollector(options: GlobalCollectorOptions)
       const settings = found.find((file) => file.path === 'settings.json');
       if (settings) {
         const text = new TextDecoder().decode(settings.content);
-        found.push(...(await hookScriptFiles(text)), ...(await programs(text)));
+        found.push(...(await hookScriptFiles(files, text)), ...(await programs(files, text)));
       }
 
       const selected = await claudeJson();

@@ -1,19 +1,18 @@
-import { BundlePathSchema } from '@agentnomad/contracts';
+import { BundlePathSchema, hasControlCharacter } from '@agentnomad/contracts';
 
 import { HOME_PLACEHOLDER, PathError, type PathEnvironment, type PathResolver } from './paths.ts';
 
-/** Device names Windows reserves, with or without an extension (`CON`, `nul.txt`). */
-const WINDOWS_RESERVED_NAMES = new Set([
-  'CON',
-  'PRN',
-  'AUX',
-  'NUL',
-  ...Array.from({ length: 9 }, (_, index) => `COM${String(index + 1)}`),
-  ...Array.from({ length: 9 }, (_, index) => `LPT${String(index + 1)}`),
-]);
+/**
+ * Names Windows keeps for devices, in any folder and with any extension (`nul.txt`),
+ * including the superscript `COM¹`–`LPT³` forms Microsoft's naming rules list.
+ */
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
 
-/** Characters Windows does not allow in file names. */
-const WINDOWS_FORBIDDEN_CHARACTERS = /[<>:"|?*]/;
+/** An 8.3 short name (`PROGRA~1`, `SSH~1`), which can reach a folder under another name. */
+const SHORT_NAME = /~\d+(\.[^.]*)?$/;
+
+/** `{{HOME}}` and its kept forms `{{HOME\}}`, `{{HOME\\}}`, …; group 1 is the backslashes. */
+const PLACEHOLDER_FORMS = /\{\{HOME(\\*)\}\}/g;
 
 /** Characters that can be part of a folder name next to the home path (for exact matching). */
 const NAME_CHARACTER = '[A-Za-z0-9._-]';
@@ -25,25 +24,30 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function hasControlCharacter(text: string): boolean {
-  return Array.from(text).some((char) => char.charCodeAt(0) < 0x20);
+/**
+ * Why a bundle path cannot be written safely on Windows (T38, T43), or `null`: a `:` would
+ * write a hidden alternate data stream, device names reach a device, a trailing dot or space
+ * is dropped (the file lands under another name), and an 8.3 short name can reach a folder
+ * that is refused under its long name (`SSH~1` is `.ssh`).
+ */
+export function windowsNameProblem(path: string): string | null {
+  for (const segment of path.split('/')) {
+    if (segment.includes(':')) return 'a name with ":" cannot be written on Windows';
+    if (hasControlCharacter(segment) || /[<>"|?*]/.test(segment)) {
+      return 'a name Windows does not allow';
+    }
+    if (WINDOWS_DEVICE.test(segment)) return 'a name Windows keeps for devices';
+    if (/[. ]$/.test(segment)) return 'a name ending in a dot or space on Windows';
+    if (SHORT_NAME.test(segment)) return 'a Windows short name (like PROGRA~1)';
+  }
+  return null;
 }
 
 /** Throws when a bundle path cannot be created as-is on Windows. */
 function assertWindowsSafe(bundlePath: string): void {
-  for (const segment of bundlePath.split('/')) {
-    const stem = (segment.split('.')[0] ?? '').toUpperCase();
-    if (
-      WINDOWS_RESERVED_NAMES.has(stem) ||
-      WINDOWS_FORBIDDEN_CHARACTERS.test(segment) ||
-      hasControlCharacter(segment) ||
-      segment.endsWith('.') ||
-      segment.endsWith(' ')
-    ) {
-      throw new PathError(
-        `"${bundlePath}" cannot be restored on Windows (invalid name "${segment}")`,
-      );
-    }
+  const problem = windowsNameProblem(bundlePath);
+  if (problem !== null) {
+    throw new PathError(`"${bundlePath}" cannot be restored on Windows (${problem})`);
   }
 }
 
@@ -69,7 +73,7 @@ function assertValidHome(environment: PathEnvironment): void {
   const valid =
     os === 'win32'
       ? /^[A-Za-z]:[\\/][^\\/]/.test(homeDir)
-      : homeDir.startsWith('/') && normalizePosix(homeDir) !== '/';
+      : homeDir.startsWith('/') && !['', '/'].includes(normalizePosix(homeDir));
   if (!valid)
     throw new PathError(`Home folder must be an absolute path below the root: "${homeDir}"`);
 }
@@ -150,11 +154,22 @@ export function createPathResolver(environment: PathEnvironment): PathResolver {
     },
 
     toPortableText(text) {
-      return windows ? windowsToPortable(text, homeDir) : posixToPortable(text, homeDir);
+      // A `{{HOME}}` already in the text gets one more backslash, so pull can tell it from
+      // the ones that stand for the home folder: `{{HOME}}` → `{{HOME\}}` (T45).
+      const kept = text.replace(
+        PLACEHOLDER_FORMS,
+        (_match, slashes: string) => `{{HOME${slashes}\\}}`,
+      );
+      return windows ? windowsToPortable(kept, homeDir) : posixToPortable(kept, homeDir);
     },
 
-    fromPortableText(text) {
-      return text.replaceAll(HOME_PLACEHOLDER, portableHome);
+    fromPortableText(text, options = {}) {
+      const backslashes = windows && options.backslashes === true;
+      const pattern = new RegExp(`${PLACEHOLDER_FORMS.source}((?:/${TEXT_SEGMENT})*)`, 'g');
+      return text.replace(pattern, (_match, slashes: string, rest: string) => {
+        if (slashes !== '') return `{{HOME${slashes.slice(1)}}}${rest}`;
+        return backslashes ? homeDir + rest.replace(/\//g, '\\') : portableHome + rest;
+      });
     },
   };
 }

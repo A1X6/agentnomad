@@ -29,6 +29,12 @@ export interface BlobStore {
    * still points to, so a bug can never delete the current copy.
    */
   delete(ref: BlobRef): Promise<void>;
+  /**
+   * Deletes files no setup points to that are older than `olderThanSeconds` (T47): left
+   * behind when a server stopped between storing a file and saving its setup, or when a
+   * cleanup failed. Returns how many were deleted.
+   */
+  deleteOrphans?(olderThanSeconds: number): Promise<number>;
 }
 
 /** Tried to delete the file a saved setup currently points to. */

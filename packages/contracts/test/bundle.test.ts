@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
-import { BUNDLE_FORMAT_VERSION, BundleSchema, type Bundle } from '../src/index.ts';
+import {
+  BUNDLE_FORMAT_VERSION,
+  BundleSchema,
+  ProjectNameSchema,
+  type Bundle,
+} from '../src/index.ts';
+
+describe('project names are checked as they are stored, NFC-normalised (T45)', () => {
+  it.each([
+    ['one that grows past 100 characters', '\u0958'.repeat(100)],
+    ['one that grows past 400 bytes', '\ufb2c'.repeat(100)],
+  ])('refuses %s', (_, name) => {
+    expect(ProjectNameSchema.safeParse(name).success).toBe(false);
+  });
+
+  it('accepts ordinary names, in any script', () => {
+    for (const name of ['my-app', 'café', '项目', 'x'.repeat(100)]) {
+      expect(ProjectNameSchema.safeParse(name).success).toBe(true);
+    }
+  });
+});
 
 const validBundle: Bundle = {
   formatVersion: 1,

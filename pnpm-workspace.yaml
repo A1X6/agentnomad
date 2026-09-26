@@ -2,6 +2,10 @@ packages:
   - packages/*
 # Install scripts are off by default. esbuild (used by drizzle-kit) ships its binary as an
 # optional dependency, so its postinstall check is not needed.
+# T51: a dependency version must be a day old before it is installed (pnpm's default,
+# written out so it is strict: a too-new version fails instead of being used anyway). Most
+# hijacked releases are found and removed within hours.
+minimumReleaseAge: 1440
 allowBuilds:
   esbuild: false
 # T38: drizzle-kit (development only, for migrations) pulls an old esbuild through

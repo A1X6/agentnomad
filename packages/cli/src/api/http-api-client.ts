@@ -263,7 +263,7 @@ export function createHttpApiClient(options: HttpApiClientOptions): ApiClient {
           retry: true,
         });
         // A retry after a lost answer finds the session already gone: that is the goal.
-        if (response.status === 401 && response.attempts > 1) return;
+        if (response.status === 401 && response.lostAnswer) return;
         expect(response, 204);
       },
 
@@ -364,8 +364,9 @@ export function createHttpApiClient(options: HttpApiClientOptions): ApiClient {
           headers: await authorization(),
           retry: true,
         });
-        // A retry after a lost answer finds the setup already deleted: that is the goal.
-        if (response.status === 404 && response.attempts > 1) return;
+        // A retry after a lost answer finds the setup already deleted: that is the goal. After
+        // only 502/503/504 nothing was done, so a 404 means it was never there (T46).
+        if (response.status === 404 && response.lostAnswer) return;
         expect(response, 204);
       },
     },

@@ -40,13 +40,24 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 /** Invisible character some Windows editors put at the start of text files. */
 const BYTE_ORDER_MARK = String.fromCharCode(0xfeff);
 
-/** The file as a JSON object, or `undefined` when it is not valid JSON or not an object. */
+/** A whole number too large to survive `JSON.parse`, anywhere inside `value` (T45). */
+function hasUnsafeInteger(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isInteger(value) && !Number.isSafeInteger(value);
+  if (Array.isArray(value)) return value.some(hasUnsafeInteger);
+  if (isJsonObject(value)) return Object.values(value).some(hasUnsafeInteger);
+  return false;
+}
+
+/**
+ * The file as a JSON object, or `undefined` when it is not valid JSON, not an object, or
+ * holds a number a merge would change (such files are kept side by side instead).
+ */
 function parseJsonObject(bytes: Uint8Array): Record<string, unknown> | undefined {
   const raw = strFromU8(bytes);
   const text = raw.startsWith(BYTE_ORDER_MARK) ? raw.slice(1) : raw;
   try {
     const value: unknown = JSON.parse(text);
-    return isJsonObject(value) ? value : undefined;
+    return isJsonObject(value) && !hasUnsafeInteger(value) ? value : undefined;
   } catch {
     return undefined;
   }

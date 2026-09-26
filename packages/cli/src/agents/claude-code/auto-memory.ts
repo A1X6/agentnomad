@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { posix, win32 } from 'node:path';
 
 import { parseSettings } from './file-gathering.ts';
+import { homePathProblem } from './global-paths.ts';
 import { MAX_PROJECT_DIR_NAME } from './project-paths.ts';
 
 export interface AutoMemoryInput {
@@ -20,7 +21,9 @@ export type AutoMemoryLocation =
   /** `autoMemoryDirectory` in user settings: one folder for every project, not this one's. */
   | { readonly kind: 'shared'; readonly dir: string }
   /** A name over 200 characters whose hashed folder does not exist here. */
-  | { readonly kind: 'unknown' };
+  | { readonly kind: 'unknown' }
+  /** A folder the project's settings chose that agentnomad will not read or write (T43). */
+  | { readonly kind: 'refused'; readonly dir: string; readonly reason: string };
 
 /**
  * `E:\Projects\agent-nomad` → `E--Projects-agent-nomad`: every character that is not a
@@ -80,6 +83,31 @@ async function configuredDirectory(
 }
 
 /**
+ * Why a memory folder chosen by a project's settings is not used, or `null` (T43). Claude
+ * Code honours such a folder only once the folder is trusted; a pulled bundle brings its own
+ * settings, so the folder must be in the home folder, not a folder for keys or one whose files
+ * run by themselves, and not elsewhere in Claude Code's own folder.
+ */
+function chosenFolderProblem(dir: string, input: AutoMemoryInput): string | null {
+  const path = pathsOf(input.platform);
+  const inside = (folder: string) => {
+    const relative = path.relative(folder, dir);
+    return relative.startsWith('..') || path.isAbsolute(relative) ? null : relative;
+  };
+  const fromHome = inside(input.homedir);
+  if (fromHome === null) return 'it is outside your home folder';
+  if (fromHome === '') return 'it is your home folder itself';
+  const problem = homePathProblem(fromHome.split(path.sep).join('/'));
+  if (problem !== null) return `it is ${problem}`;
+  const fromBase = inside(input.baseDir);
+  const fromProjects = inside(path.join(input.baseDir, 'projects'));
+  if (fromBase !== null && (fromProjects === null || fromProjects === '')) {
+    return "it is inside Claude Code's own folder";
+  }
+  return null;
+}
+
+/**
  * Finds this project's auto memory folder the way Claude Code does (T26):
  * `autoMemoryDirectory` from the project's local or shared settings, then from user
  * settings (shared by every project), then `CLAUDE_CODE_PROJECT_DIR_NAME`, then
@@ -90,7 +118,9 @@ export async function findAutoMemory(input: AutoMemoryInput): Promise<AutoMemory
   const claudeDir = path.join(input.projectDir, '.claude');
   for (const file of ['settings.local.json', 'settings.json']) {
     const dir = await configuredDirectory(path.join(claudeDir, file), input);
-    if (dir !== null) return { kind: 'folder', dir };
+    if (dir === null) continue;
+    const reason = chosenFolderProblem(dir, input);
+    return reason === null ? { kind: 'folder', dir } : { kind: 'refused', dir, reason };
   }
   const shared = await configuredDirectory(path.join(input.baseDir, 'settings.json'), input);
   if (shared !== null) return { kind: 'shared', dir: shared };

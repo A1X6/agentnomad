@@ -1,5 +1,5 @@
-import type { KdfParams } from '@agentnomad/contracts';
-import { eq } from 'drizzle-orm';
+import { MAX_BUNDLE_BYTES, USER_STORAGE_LIMITS, type KdfParams } from '@agentnomad/contracts';
+import { eq, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -308,6 +308,87 @@ describe('BundleRepository.putMeta', () => {
     expect(await blobs.get({ userId: user.id, blobId: fromA.blobId })).toEqual(bytes(40, 0xa));
     expect(await blobs.get(start)).toBeNull();
     expect(await blobs.get(fromB)).toBeNull();
+  });
+});
+
+describe('storage limits per account (T47)', () => {
+  it(`refuses a new setup past ${String(USER_STORAGE_LIMITS.maxSetups)}, never an update`, async () => {
+    const user = await userRepo.create(newUser('ahmed'));
+    const scopeKey = (index: number) => index.toString(16).padStart(64, '0');
+    for (let index = 0; index < USER_STORAGE_LIMITS.maxSetups; index++) {
+      const blob = await blobs.put(user.id, bytes(40));
+      await bundleRepo.putMeta(
+        write({ userId: user.id, scopeKey: scopeKey(index) }, 0, blob.blobId, 1),
+      );
+    }
+    const one = await blobs.put(user.id, bytes(40));
+    expect(
+      await bundleRepo.putMeta(
+        write({ userId: user.id, scopeKey: scopeKey(999) }, 0, one.blobId, 1),
+      ),
+    ).toMatchObject({ outcome: 'over-limit' });
+    // A new revision of an existing setup still saves.
+    const update = await blobs.put(user.id, bytes(40, 2));
+    expect(
+      await bundleRepo.putMeta(
+        write({ userId: user.id, scopeKey: scopeKey(0) }, 1, update.blobId, 2),
+      ),
+    ).toMatchObject({ outcome: 'saved' });
+    expect(await bundleRepo.usage(user.id)).toEqual({
+      setups: USER_STORAGE_LIMITS.maxSetups,
+      bytes: 40 * USER_STORAGE_LIMITS.maxSetups,
+    });
+  });
+
+  it('refuses growing past the byte limit, but never a save that does not grow', async () => {
+    const user = await userRepo.create(newUser('ahmed'));
+    const big = (key: Partial<BundleKey>, revision: number, blobId: string, size: number) => ({
+      ...write({ userId: user.id, ...key }, revision, blobId, revision + 1),
+      sizeBytes: size,
+    });
+    // Each setup is at most 5 MB, so the limit is reached with full ones.
+    const full = Math.floor(USER_STORAGE_LIMITS.maxBytes / MAX_BUNDLE_BYTES);
+    const scopeKey = (index: number) => index.toString(16).padStart(64, '0');
+    for (let index = 0; index < full; index++) {
+      const blob = await blobs.put(user.id, bytes(40));
+      await bundleRepo.putMeta(
+        big({ scopeKey: scopeKey(index) }, 0, blob.blobId, MAX_BUNDLE_BYTES),
+      );
+    }
+    const extra = await blobs.put(user.id, bytes(40));
+    expect(
+      await bundleRepo.putMeta(big({ scopeKey: scopeKey(999) }, 0, extra.blobId, 40)),
+    ).toMatchObject({
+      outcome: 'over-limit',
+    });
+    // The same size again, or smaller: always saved, so nobody gets stuck at the limit.
+    const same = await blobs.put(user.id, bytes(40));
+    expect(
+      await bundleRepo.putMeta(big({ scopeKey: scopeKey(0) }, 1, same.blobId, MAX_BUNDLE_BYTES)),
+    ).toMatchObject({ outcome: 'saved' });
+    const smaller = await blobs.put(user.id, bytes(40));
+    expect(
+      await bundleRepo.putMeta(big({ scopeKey: scopeKey(1) }, 1, smaller.blobId, 40)),
+    ).toMatchObject({
+      outcome: 'saved',
+    });
+  });
+});
+
+describe('BlobStore.deleteOrphans (T47)', () => {
+  it('deletes old files no setup points to, and nothing else', async () => {
+    const user = await userRepo.create(newUser('ahmed'));
+    const current = await blobs.put(user.id, bytes(40, 1));
+    await bundleRepo.putMeta(write({ userId: user.id }, 0, current.blobId, 1));
+    const orphan = await blobs.put(user.id, bytes(40, 2));
+    const fresh = await blobs.put(user.id, bytes(40, 3));
+    await database.db.execute(
+      sql`update bundle_blobs set created_at = now() - interval '2 hours' where id in (${current.blobId}, ${orphan.blobId})`,
+    );
+    expect(await blobs.deleteOrphans?.(60 * 60)).toBe(1);
+    expect(await blobs.get(orphan)).toBeNull();
+    expect(await blobs.get(current)).not.toBeNull();
+    expect(await blobs.get(fresh)).not.toBeNull();
   });
 });
 

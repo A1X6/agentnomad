@@ -1,6 +1,16 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { posix } from 'node:path';
 
 import { BACKUP_MARKER } from '@agentnomad/core';
@@ -108,6 +118,9 @@ export function shellProfileFor(
   return { path: posix.join(homedir, '.profile'), kind: 'posix', label: '~/.profile' };
 }
 
+const isMissing = (error: unknown) =>
+  error instanceof Error && 'code' in error && error.code === 'ENOENT';
+
 /** `20260925T120000Z`, as in the T11 backup names. */
 const stamp = (date: Date) =>
   date
@@ -123,26 +136,37 @@ export function createShellProfileWriter(
   return {
     where: profile.label,
     async write(variables) {
+      // A profile linked from a dotfiles folder (stow, chezmoi) is written where it really
+      // is, so the link stays (T46).
+      // Only a link is followed: a plain file keeps the path as given.
+      const link = await lstat(profile.path).catch((error: unknown) => {
+        if (isMissing(error)) return null;
+        throw error;
+      });
+      const target = link?.isSymbolicLink() ? await realpath(profile.path) : profile.path;
       let existing: string | null;
-      let mode = 0o644;
+      // A new profile holds saved values, so only this user may read it (T46).
+      let mode = 0o600;
       try {
-        existing = await readFile(profile.path, 'utf8');
-        mode = (await stat(profile.path)).mode & 0o777;
-      } catch {
+        existing = await readFile(target, 'utf8');
+        mode = (await stat(target)).mode & 0o777;
+      } catch (error) {
+        // Only a missing file is started fresh; any other error must not replace the profile.
+        if (!isMissing(error)) throw error;
         existing = null;
       }
-      await mkdir(posix.dirname(profile.path), { recursive: true });
+      await mkdir(posix.dirname(target), { recursive: true });
       let backup: string | null = null;
       if (existing !== null) {
-        backup = `${profile.path}${BACKUP_MARKER}${stamp(now())}`;
+        backup = `${target}${BACKUP_MARKER}${stamp(now())}`;
         await writeFile(backup, existing, { mode });
       }
       const updated = upsertBlock(existing ?? '', variables, profile.kind);
-      const temp = `${profile.path}.agentnomad-tmp-${randomBytes(4).toString('hex')}`;
+      const temp = `${target}.agentnomad-tmp-${randomBytes(4).toString('hex')}`;
       try {
         await writeFile(temp, updated, { flag: 'wx', mode });
         await chmod(temp, mode);
-        await rename(temp, profile.path);
+        await rename(temp, target);
       } catch (error) {
         await rm(temp, { force: true });
         throw error;

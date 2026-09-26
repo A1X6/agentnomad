@@ -1,7 +1,12 @@
 import { DEFAULT_KDF_PARAMS, type KdfParams, type Username } from '@agentnomad/contracts';
 
 import type { NewUser, SessionRepository, UserRepository } from '../db/repositories.ts';
-import { RATE_LIMITS, RateLimitedError, type RateLimiter } from '../rate-limit/rate-limiter.ts';
+import {
+  RATE_LIMITS,
+  RateLimitedError,
+  type RateLimiter,
+  type RateLimitRule,
+} from '../rate-limit/rate-limiter.ts';
 import type { ServerKeys } from './server-keys.ts';
 import { hashSessionToken, newSessionToken } from './session-tokens.ts';
 
@@ -83,14 +88,17 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
    * too many recent failures, a failure counts, a success clears the count. Unknown usernames
    * are counted the same way, so the limit reveals nothing either.
    */
-  async function guardedCheck(username: string, check: () => Promise<boolean>): Promise<void> {
-    const status = await limiter.check(FAILED, username);
+  async function guardedCheck(
+    rule: RateLimitRule,
+    subject: string,
+    check: () => Promise<boolean>,
+  ): Promise<void> {
+    // Counted before the check, in one atomic step (T47): many guesses sent at once cannot
+    // all pass a count read before any of them was added.
+    const status = await limiter.hit(rule, subject);
     if (!status.allowed) throw new RateLimitedError(status.retryAfterSeconds);
-    if (!(await check())) {
-      await limiter.hit(FAILED, username);
-      throw new InvalidCredentialsError();
-    }
-    await limiter.reset(FAILED, username);
+    if (!(await check())) throw new InvalidCredentialsError();
+    await limiter.reset(rule, subject);
   }
 
   async function issueSession(userId: string, deviceName: string): Promise<IssuedSession> {
@@ -130,6 +138,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       // Do the same hashing work for an unknown user, so response time does not reveal
       // whether the account exists.
       await guardedCheck(
+        FAILED,
         username,
         async () => (await keys.verifyAuthKey(authKey, user?.authHash ?? '')) && user !== null,
       );
@@ -148,7 +157,11 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     async deleteAccount(userId, authKey) {
       const user = await users.findById(userId);
       if (!user) throw new InvalidCredentialsError();
-      await guardedCheck(user.username, () => keys.verifyAuthKey(authKey, user.authHash));
+      // Its own count, keyed by the account (only its sessions can reach this), so failed
+      // logins by others never block the owner (T47).
+      await guardedCheck(RATE_LIMITS.failedDeletesPerAccount, user.id, () =>
+        keys.verifyAuthKey(authKey, user.authHash),
+      );
       // ON DELETE CASCADE removes sessions, setups and files in the same statement.
       await users.delete(user.id);
     },

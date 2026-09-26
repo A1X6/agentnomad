@@ -8,9 +8,11 @@ import {
   MAX_BUNDLE_BYTES,
   PutBundleResponseSchema,
   SessionResponseSchema,
+  USER_STORAGE_LIMITS,
 } from '@agentnomad/contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { RATE_LIMITS } from '../src/rate-limit/rate-limiter.ts';
 import { createTestApp, postJson, type TestApp } from './support/app.ts';
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
@@ -285,5 +287,40 @@ describe('DELETE', () => {
     await t.app.request(GLOBAL_PATH, as(token, 'DELETE'));
     const res = await put(token, { expected: 0, body: bytes(64, 2) });
     expect(PutBundleResponseSchema.parse(await res.json()).revision).toBe(1);
+  });
+});
+
+describe('limits per account (T47)', () => {
+  it(`refuses a new setup past ${String(USER_STORAGE_LIMITS.maxSetups)} with 413 and says why, storing nothing`, async () => {
+    const token = await register();
+    for (let index = 0; index < USER_STORAGE_LIMITS.maxSetups; index++) {
+      const path = `/bundles/claude-code/${index.toString(16).padStart(64, '0')}`;
+      const res = await put(token, {
+        expected: 0,
+        body: bytes(64, 1),
+        path,
+        nameEnc: bytes(40, 1),
+      });
+      expect(res.status).toBe(200);
+    }
+    const files = await fileCount();
+    const res = await put(token, { expected: 0, body: bytes(64, 2) });
+    expect(res.status).toBe(413);
+    const body = await error(res);
+    expect(body.code).toBe('payload_too_large');
+    expect(body.message).toContain(`at most ${String(USER_STORAGE_LIMITS.maxSetups)} saved setups`);
+    expect(await fileCount()).toBe(files);
+  });
+
+  it(`allows ${String(RATE_LIMITS.writesPerAccount.limit)} saves and deletes an hour per account, then 429`, async () => {
+    const token = await register();
+    for (let index = 0; index < RATE_LIMITS.writesPerAccount.limit; index++) {
+      expect((await t.app.request(GLOBAL_PATH, as(token, 'DELETE'))).status).toBe(404);
+    }
+    const res = await t.app.request(GLOBAL_PATH, as(token, 'DELETE'));
+    expect(res.status).toBe(429);
+    expect((await error(res)).code).toBe('rate_limited');
+    // Reading is not limited this way.
+    expect((await t.app.request('/bundles', as(token))).status).toBe(200);
   });
 });

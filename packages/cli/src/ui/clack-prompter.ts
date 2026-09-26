@@ -2,6 +2,7 @@ import type { Writable } from 'node:stream';
 
 import * as clack from '@clack/prompts';
 
+import { printable } from './printable.ts';
 import { PromptCancelledError, type Choice, type Prompter, type Reporter } from './prompter.ts';
 
 /** A clack answer, or PromptCancelledError when the user pressed Ctrl+C or Esc. */
@@ -13,8 +14,8 @@ export function unwrapAnswer<T>(answer: T): Exclude<T, symbol> {
 const toOptions = <T extends string>(choices: readonly Choice<T>[]) =>
   choices.map((choice) => ({
     value: choice.value,
-    label: choice.label,
-    ...(choice.hint !== undefined && { hint: choice.hint }),
+    label: printable(choice.label),
+    ...(choice.hint !== undefined && { hint: printable(choice.hint) }),
   }));
 
 /** The Prompter on @clack/prompts (T04 decision). Commands only see the Prompter interface. */
@@ -22,13 +23,15 @@ export function createClackPrompter(): Prompter {
   return {
     async select(message, choices) {
       // clack types options loosely for generic values; the answer is one of `choices`.
-      return unwrapAnswer(await clack.select({ message, options: toOptions(choices) as never }));
+      return unwrapAnswer(
+        await clack.select({ message: printable(message), options: toOptions(choices) as never }),
+      );
     },
 
     async multiselect(message, choices, options = {}) {
       return unwrapAnswer(
         await clack.multiselect({
-          message,
+          message: printable(message),
           options: toOptions(choices) as never,
           required: options.required ?? true,
           ...(options.initial && { initialValues: [...options.initial] }),
@@ -40,7 +43,7 @@ export function createClackPrompter(): Prompter {
       const { validate } = options;
       return unwrapAnswer(
         await clack.text({
-          message,
+          message: printable(message),
           ...(options.placeholder !== undefined && { placeholder: options.placeholder }),
           ...(validate && { validate: (value: string | undefined) => validate(value ?? '') }),
         }),
@@ -59,7 +62,9 @@ export function createClackPrompter(): Prompter {
     },
 
     async confirm(message, initial = false) {
-      return unwrapAnswer(await clack.confirm({ message, initialValue: initial }));
+      return unwrapAnswer(
+        await clack.confirm({ message: printable(message), initialValue: initial }),
+      );
     },
   };
 }
@@ -79,35 +84,35 @@ export function createClackReporter(options: ClackReporterOptions = {}): Reporte
   const diagnostics = options.diagnostics && { output: options.diagnostics };
   return {
     info: (message) => {
-      clack.log.info(message);
+      clack.log.info(printable(message));
     },
     success: (message) => {
-      clack.log.success(message);
+      clack.log.success(printable(message));
     },
     warn: (message) => {
-      clack.log.warn(message, diagnostics);
+      clack.log.warn(printable(message), diagnostics);
     },
     error: (message) => {
-      clack.log.error(message, diagnostics);
+      clack.log.error(printable(message), diagnostics);
     },
     spinner: () => {
       if (options.interactive === false) {
         return {
           start: (message) => {
-            clack.log.step(message);
+            clack.log.step(printable(message));
           },
           stop: (message) => {
-            if (message) clack.log.step(message);
+            if (message) clack.log.step(printable(message));
           },
         };
       }
       const spinner = clack.spinner();
       return {
         start: (message) => {
-          spinner.start(message);
+          spinner.start(printable(message));
         },
         stop: (message) => {
-          spinner.stop(message);
+          spinner.stop(message === undefined ? message : printable(message));
         },
       };
     },

@@ -5,6 +5,7 @@ import {
 } from '@agentnomad/contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { describeError } from '../src/logging/logger.ts';
 import { RATE_LIMITS } from '../src/rate-limit/rate-limiter.ts';
 import { createServerFromEnv } from '../src/server.ts';
 import { TEST_IP_HEADER, createTestApp, postJson, type TestApp } from './support/app.ts';
@@ -76,6 +77,18 @@ describe('per-IP limits', () => {
   });
 });
 
+describe('per-IP limits count an IPv6 /64 as one visitor (T47)', () => {
+  it('rotating addresses inside one /64 gives no fresh limit', async () => {
+    const prelogin = (ip: string) =>
+      t.app.request('/auth/prelogin', postJson({ username: 'ghost' }, fromIp(ip)));
+    for (let index = 0; index < RATE_LIMITS.authPerIp.limit; index++) {
+      expect((await prelogin(`2001:db8:0:1::${index.toString(16)}`)).status).toBe(200);
+    }
+    await expectRateLimited(await prelogin('2001:db8:0:1:ffff::1'));
+    expect((await prelogin('2001:db8:0:2::1')).status).toBe(200);
+  });
+});
+
 describe('failed logins per account', () => {
   const limit = RATE_LIMITS.failedLoginsPerAccount.limit;
 
@@ -96,6 +109,29 @@ describe('failed logins per account', () => {
     expect((await login('ahmed', goodKey, '198.51.100.3')).status).toBe(200);
   });
 
+  it('counts guesses sent all at once, never more than the limit (T47)', async () => {
+    await register('ahmed');
+    const answers = await Promise.all(
+      Array.from({ length: 25 }, (_, index) =>
+        login('ahmed', badKey, `203.0.113.${String(index)}`),
+      ),
+    );
+    const tried = answers.filter((res) => res.status === 401).length;
+    expect(tried).toBe(limit);
+    expect(answers.filter((res) => res.status === 429)).toHaveLength(25 - limit);
+  });
+
+  it('failed logins by someone else never block the owner deleting the account (T47)', async () => {
+    const token = SessionResponseSchema.parse(await (await register('ahmed')).json()).sessionToken;
+    for (let index = 0; index < limit; index++) await login('ahmed', badKey);
+    const res = await t.app.request('/account', {
+      method: 'DELETE',
+      body: JSON.stringify({ authKey: goodKey }),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(204);
+  });
+
   it('treats unknown usernames the same way, so the pause reveals nothing', async () => {
     for (let index = 0; index < limit; index++) {
       expect((await login('ghost', badKey, `203.0.113.${String(index)}`)).status).toBe(401);
@@ -113,6 +149,30 @@ describe('failed logins per account', () => {
       });
     for (let index = 0; index < limit; index++) expect((await del(badKey)).status).toBe(401);
     await expectRateLimited(await del(goodKey));
+  });
+});
+
+describe('describeError never logs query parameters (T47)', () => {
+  it('keeps the SQL text and the database error, not the values', () => {
+    const cause = Object.assign(new Error('connection lost'), { code: '08006' });
+    const failed = Object.assign(
+      new Error('Failed query: insert into "users" values ($1, $2)\nparams: ahmed,SECRET-HASH'),
+      {
+        name: 'DrizzleQueryError',
+        query: 'insert into "users" values ($1, $2)',
+        params: ['ahmed', 'SECRET-HASH'],
+        cause,
+      },
+    );
+    const fields = describeError(failed);
+    expect(JSON.stringify(fields)).not.toContain('SECRET-HASH');
+    expect(fields).toEqual({
+      errorName: 'DrizzleQueryError',
+      query: 'insert into "users" values ($1, $2)',
+      causeName: 'Error',
+      causeMessage: 'connection lost',
+      causeCode: '08006',
+    });
   });
 });
 

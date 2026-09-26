@@ -21,6 +21,7 @@ export class AnswerNeededError extends Error {
 export function createNoTerminalPrompter(): Prompter {
   const fail = (message: string) => Promise.reject(new AnswerNeededError(message));
   return {
+    canAsk: false,
     select: (message) => fail(message),
     multiselect: (message) => fail(message),
     text: (message) => fail(message),

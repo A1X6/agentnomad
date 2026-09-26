@@ -157,7 +157,7 @@ export function createClaudeCodeAfterRestore(deps: AfterRestoreDeps) {
         'Skills from your claude.ai account on the other PC:',
         ...plan.toAdd.map(
           (skill) =>
-            `  + ${skill.name}${skill.runsCommands ? '  ⚠ runs commands (!`…` lines) as a local skill' : ''}`,
+            `  + ${skill.name}${skill.runsCommands ? '  ⚠ runs commands as a local skill (! lines, ```! blocks or hooks)' : ''}`,
         ),
         ...plan.skipped.map((skill) => `  - ${skill.name}: skipped, ${skill.reason}`),
       ].join('\n'),

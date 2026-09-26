@@ -9,7 +9,9 @@ import type {
   BundleRepository,
   PutMetaResult,
 } from './repositories.ts';
-import { bundles } from './schema.ts';
+import { USER_STORAGE_LIMITS } from '@agentnomad/contracts';
+
+import { bundles, users } from './schema.ts';
 
 /** Metadata columns only; `bundles` holds no bytes, but list stays explicit anyway. */
 const metaColumns = {
@@ -100,7 +102,31 @@ export function createBundleRepository(db: Database): BundleRepository {
           return row;
         };
 
+        // One save at a time per account (the user row is locked first, then the setup, as
+        // account delete does), so two saves at once cannot both slip under the limits (T47).
+        await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.id, write.key.userId))
+          .for('update');
         let current = await lockCurrent();
+
+        const [used] = await tx
+          .select({
+            setups: sql<number>`count(*)::int`,
+            bytes: sql<string>`coalesce(sum(${bundles.sizeBytes}), 0)::bigint`,
+          })
+          .from(bundles)
+          .where(eq(bundles.userId, write.key.userId));
+        const setups = (used?.setups ?? 0) + (current ? 0 : 1);
+        const bytes = Number(used?.bytes ?? 0) - (current?.sizeBytes ?? 0) + write.sizeBytes;
+        if (setups > USER_STORAGE_LIMITS.maxSetups) {
+          return { outcome: 'over-limit', reason: overLimit('setups') };
+        }
+        // Saving a setup no bigger than before is always allowed, so nobody gets stuck.
+        if (bytes > USER_STORAGE_LIMITS.maxBytes && write.sizeBytes > (current?.sizeBytes ?? 0)) {
+          return { outcome: 'over-limit', reason: overLimit('bytes') };
+        }
 
         if (!current) {
           if (write.expectedRevision !== 0) return { outcome: 'conflict', currentRevision: 0 };
@@ -144,11 +170,29 @@ export function createBundleRepository(db: Database): BundleRepository {
       });
     },
 
+    async usage(userId) {
+      const [row] = await db
+        .select({
+          setups: sql<number>`count(*)::int`,
+          bytes: sql<string>`coalesce(sum(${bundles.sizeBytes}), 0)::bigint`,
+        })
+        .from(bundles)
+        .where(eq(bundles.userId, userId));
+      return { setups: row?.setups ?? 0, bytes: Number(row?.bytes ?? 0) };
+    },
+
     async delete(key) {
       const [row] = await db.delete(bundles).where(matchesKey(key)).returning(metaColumns);
       return row ? toBundleMeta(row) : null;
     },
   };
+}
+
+/** Why a save is refused by the storage limits, in words the CLI shows as they are. */
+export function overLimit(kind: 'setups' | 'bytes'): string {
+  return kind === 'setups'
+    ? `An account keeps at most ${String(USER_STORAGE_LIMITS.maxSetups)} saved setups. Delete some with \`agentnomad delete\` first.`
+    : `An account keeps at most ${String(USER_STORAGE_LIMITS.maxBytes / 1024 / 1024)} MB of saved setups. Delete some with \`agentnomad delete\` or make this one smaller.`;
 }
 
 /** The columns a save writes, apart from the revision number. */

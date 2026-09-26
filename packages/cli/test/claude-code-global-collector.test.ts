@@ -337,6 +337,25 @@ describe.runIf(posix)('global collector: links', () => {
   });
 });
 
+describe('global collector: a link into a folder for keys (T45)', () => {
+  it('is never followed, and push is told why', async () => {
+    await put(join(home, '.ssh', 'id_ed25519'), 'PRIVATE KEY');
+    await mkdir(join(base, 'skills'), { recursive: true });
+    await symlink(
+      join(home, '.ssh'),
+      join(base, 'skills', 'keys'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const skipped: string[] = [];
+    const files = await collector().collect(
+      { kind: 'global' },
+      { includeMemory: false, onSkipped: (path, reason) => skipped.push(`${path}: ${reason}`) },
+    );
+    expect(paths(files).some((path) => path.startsWith('skills/keys'))).toBe(false);
+    expect(skipped).toEqual(['skills/keys: it links into a folder for keys and logins']);
+  });
+});
+
 describe('global collector: programs the status line and hooks need', () => {
   const statusLine = (command: string) =>
     put(join(base, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command } }));

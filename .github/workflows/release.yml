@@ -17,24 +17,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The tagged commit must have passed CI on main first (T48): a release never starts from a
+  # commit whose checks failed or are still running.
+  ci-passed:
+    name: CI passed for this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: A successful CI run exists for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success" --jq '.total_count')"
+          test "$count" -gt 0 || { echo "No successful CI run for $GITHUB_SHA; wait for CI on main, then tag."; exit 1; }
+
   verify:
-    name: verify on ${{ matrix.os }}
+    name: verify on ${{ matrix.os }}, Node ${{ matrix.node }}
+    needs: ci-passed
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: true
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # The lowest version the package supports is tested before publishing too (T48).
+        node: ['22.13', '24']
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
 
       - name: Set up pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -75,7 +95,7 @@ jobs:
 
       # The Linux build is the one published: the exact bytes that were tested.
       - name: Keep the tested package
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.node == '24'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package
@@ -102,13 +122,14 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # Trusted publishing needs npm 11.5.1 or newer.
+      # Trusted publishing needs npm 11.5.1 or newer (npm's docs). An exact version, so this
+      # job, which can publish, never runs an npm release nobody chose (T48).
       - name: npm new enough for trusted publishing
         shell: bash
         run: |
           npm --version
           node -e "const [a,b,c]=process.argv[1].split('.').map(Number);process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$(npm --version)" \
-            || npm install -g npm@11
+            || npm install -g npm@11.20.0
           npm --version
 
       - name: Get the tested package

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -172,6 +172,57 @@ describe('project collector: what is taken', () => {
   });
 });
 
+describe('project collector: links and size (T45)', () => {
+  /** A folder link; a junction on Windows, which needs no admin rights. */
+  const linkFolder = (target: string, path: string) =>
+    symlink(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+
+  it('never follows a link into a folder for keys, and says so', async () => {
+    await put(join(home, '.ssh', 'id_ed25519'), 'PRIVATE KEY');
+    await mkdir(join(project, '.claude', 'skills'), { recursive: true });
+    await linkFolder(join(home, '.ssh'), join(project, '.claude', 'skills', 'x'));
+    const skipped: string[] = [];
+    const found = await createClaudeCodeProjectCollector(options()).collect(
+      { kind: 'project', projectDir: project },
+      { includeMemory: false, onSkipped: (path, reason) => skipped.push(`${path}: ${reason}`) },
+    );
+    expect(paths(found).filter((path) => path.includes('skills'))).toEqual([]);
+    expect(skipped).toEqual(['.claude/skills/x: it links to a place outside the project']);
+  });
+
+  it('never follows a link out of the project', async () => {
+    await put(join(root, 'elsewhere', 'SKILL.md'), 'not this project');
+    await mkdir(join(project, '.claude', 'skills'), { recursive: true });
+    await linkFolder(join(root, 'elsewhere'), join(project, '.claude', 'skills', 'x'));
+    expect(paths(await collect()).filter((path) => path.includes('skills'))).toEqual([]);
+  });
+
+  it('follows a link that stays inside the project', async () => {
+    await put(join(project, 'shared', 'review', 'SKILL.md'), 'review');
+    await mkdir(join(project, '.claude', 'skills'), { recursive: true });
+    await linkFolder(
+      join(project, 'shared', 'review'),
+      join(project, '.claude', 'skills', 'review'),
+    );
+    expect(text(await collect(), '.claude/skills/review/SKILL.md')).toBe('review');
+  });
+
+  it('leaves out a file larger than 10 MB', async () => {
+    await put(
+      join(project, '.claude', 'skills', 'big', 'data.bin'),
+      'x'.repeat(10 * 1024 * 1024 + 1),
+    );
+    await put(join(project, '.claude', 'skills', 'big', 'SKILL.md'), 'small');
+    const skipped: string[] = [];
+    const found = await createClaudeCodeProjectCollector(options()).collect(
+      { kind: 'project', projectDir: project },
+      { includeMemory: false, onSkipped: (path, reason) => skipped.push(`${path}: ${reason}`) },
+    );
+    expect(paths(found)).toContain('.claude/skills/big/SKILL.md');
+    expect(skipped).toEqual(['.claude/skills/big/data.bin: it is larger than 10 MB']);
+  });
+});
+
 describe('auto memory location', () => {
   it('names the folder like Claude Code: every non-letter or digit becomes -', () => {
     expect(projectDirName('E:\\Projects\\agent-nomad')).toBe('E--Projects-agent-nomad');
@@ -212,6 +263,32 @@ describe('auto memory location', () => {
       dir: join(home, 'notes', 'my-app-memory'),
     });
     expect(text(await collect(true), '.agentnomad/auto-memory/MEMORY.md')).toBe('custom');
+  });
+
+  it('takes only Markdown files from auto memory (T43)', async () => {
+    await put(
+      join(project, '.claude', 'settings.local.json'),
+      JSON.stringify({ autoMemoryDirectory: '~/notes/my-app-memory' }),
+    );
+    await put(join(home, 'notes', 'my-app-memory', 'MEMORY.md'), 'notes');
+    await put(join(home, 'notes', 'my-app-memory', 'run.sh'), 'echo hi');
+    expect(paths(await collect(true)).filter((path) => path.includes('auto-memory'))).toEqual([
+      '.agentnomad/auto-memory/MEMORY.md',
+    ]);
+  });
+
+  it('never reads a memory folder that is a folder for keys (T43)', async () => {
+    await put(
+      join(project, '.claude', 'settings.json'),
+      JSON.stringify({ autoMemoryDirectory: '~/.ssh' }),
+    );
+    await put(join(home, '.ssh', 'notes.md'), 'secret');
+    expect(await findAutoMemory({ ...options(), projectDir: project })).toEqual({
+      kind: 'refused',
+      dir: join(home, '.ssh'),
+      reason: 'it is a folder for keys and logins',
+    });
+    expect(paths(await collect(true))).toEqual(['.claude/settings.json']);
   });
 
   it('skips a memory folder set in user settings, since every project shares it', async () => {

@@ -1,7 +1,7 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, lt, notExists, sql } from 'drizzle-orm';
 
 import { FOREIGN_KEY_VIOLATION, postgresErrorCode, type Database } from '../db/database.ts';
-import { bundleBlobs } from '../db/schema.ts';
+import { bundleBlobs, bundles } from '../db/schema.ts';
 import { BlobInUseError, type BlobRef, type BlobStore } from './blob-store.ts';
 
 const matchesRef = (ref: BlobRef) =>
@@ -36,6 +36,22 @@ export function createPostgresBlobStore(db: Database): BlobStore {
         if (postgresErrorCode(error) === FOREIGN_KEY_VIOLATION) throw new BlobInUseError();
         throw error;
       }
+    },
+
+    async deleteOrphans(olderThanSeconds) {
+      // Old enough that no upload is still between storing its file and saving its setup.
+      const removed = await db
+        .delete(bundleBlobs)
+        .where(
+          and(
+            lt(bundleBlobs.createdAt, sql`now() - make_interval(secs => ${olderThanSeconds})`),
+            notExists(
+              db.select({ id: bundles.id }).from(bundles).where(eq(bundles.blobId, bundleBlobs.id)),
+            ),
+          ),
+        )
+        .returning({ id: bundleBlobs.id });
+      return removed.length;
     },
   };
 }

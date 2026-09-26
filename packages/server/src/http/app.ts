@@ -56,7 +56,7 @@ export function createApp(deps: AppDeps): Hono<{ Variables: RequestIdVariables }
       })
       .get(API_ROUTES.health, (c) => c.json({ status: 'ok' } satisfies HealthResponse))
       .route('/', authRoutes(deps.auth, deps))
-      .route('/', bundleRoutes(deps.auth, deps.bundles))
+      .route('/', bundleRoutes(deps.auth, deps.bundles, deps.limiter))
       .route('/', accountRoutes(deps.auth))
       .notFound(handleNotFound)
       .onError(createErrorHandler(logger))

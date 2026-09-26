@@ -63,7 +63,11 @@ export function createClaudeCodeAdapter(options: ClaudeCodeAdapterOptions): Agen
     afterRestore: createClaudeCodeAfterRestore({ system, restorer }),
     inspector: {
       unknownEntries: (target) =>
-        findUnknownEntries(target, { baseDir, platform: options.platform }),
+        findUnknownEntries(target, {
+          baseDir,
+          platform: options.platform,
+          homedir: options.homedir,
+        }),
       async notices(command) {
         const found = await detectManagedSettings(
           nodeManagedSettingsSystem(options.env, baseDir, options.platform),

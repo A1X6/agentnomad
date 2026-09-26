@@ -1,0 +1,44 @@
+{
+  "$schema": "https://www.a1x6.dev/schemas/a1x6-project.json",
+  "slug": "agentnomad",
+  "title": "agentnomad",
+  "description": "An open-source CLI that saves your Claude Code setup (skills, subagents, commands, hooks, MCP servers, plugins) and restores it on any other PC, macOS, Linux or Windows, in one command. Everything is encrypted on your machine first (Argon2id + XChaCha20-Poly1305), so the server only stores ciphertext; home paths are rewritten per PC, anything that runs programs is shown before it is written, and every release is tested end to end across operating systems and published with npm provenance.",
+  "category": "CLI / Tools",
+  "featured": false,
+  "liveUrl": "https://www.npmjs.com/package/agentnomad",
+  "skills": [
+    {
+      "name": "TypeScript",
+      "iconUrl": "https://cdn.simpleicons.org/typescript",
+      "category": "Languages"
+    },
+    {
+      "name": "Node.js",
+      "iconUrl": "https://cdn.simpleicons.org/nodedotjs",
+      "category": "Backend"
+    },
+    { "name": "Hono", "iconUrl": "https://cdn.simpleicons.org/hono", "category": "Backend" },
+    {
+      "name": "Drizzle ORM",
+      "iconUrl": "https://cdn.simpleicons.org/drizzle",
+      "category": "Backend"
+    },
+    {
+      "name": "PostgreSQL",
+      "iconUrl": "https://cdn.simpleicons.org/postgresql",
+      "category": "Databases"
+    },
+    { "name": "Zod", "icon": "zod", "category": "Tools" },
+    { "name": "GitHub Actions", "icon": "githubactions", "category": "Tools" },
+    {
+      "name": "Render",
+      "iconUrl": "https://cdn.simpleicons.org/render/white",
+      "category": "Tools"
+    },
+    { "name": "npm", "icon": "npm", "category": "Tools" }
+  ],
+  "images": {
+    "cover": "images/cover.webp",
+    "gallery": ["images/screenshot-1.webp", "images/screenshot-2.webp", "images/screenshot-3.webp"]
+  }
+}

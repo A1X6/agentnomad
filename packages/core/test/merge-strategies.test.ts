@@ -106,6 +106,13 @@ describe('json merge: combine by key, incoming wins', () => {
     expect(jsonMerge.appliesTo('settings.json.bak')).toBe(false);
   });
 
+  it('keeps a file with a number JSON cannot hold exactly, side by side (T45)', () => {
+    const existing = strToU8('{"id": 12345678901234567890}');
+    const incoming = strToU8('{"theme": "dark"}');
+    const writes = jsonMerge.resolve({ path: 'x.json', existing, incoming });
+    expect(writes.map((write) => write.path)).toEqual([`x.json${INCOMING_MARKER}${STAMP}`]);
+  });
+
   it('keeps keys only on this PC and adds keys only in the bundle', () => {
     expect(mergedJson({ theme: 'dark' }, { model: 'opus' })).toEqual({
       theme: 'dark',

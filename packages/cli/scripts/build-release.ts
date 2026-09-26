@@ -6,8 +6,9 @@
  *   node --experimental-strip-types packages/cli/scripts/build-release.ts
  *
  * Refuses to finish if anything but our own source ended up in the bundle, or if a library
- * the bundle imports is not declared as a dependency.
+ * the bundle imports is not declared as a dependency. Ships an npm-shrinkwrap.json (T51).
  */
+import { execSync } from 'node:child_process';
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,13 +108,21 @@ const manifest = {
   author: 'A1X6',
   type: 'module',
   bin: { agentnomad: './dist/agentnomad.js' },
-  files: ['dist'],
+  files: ['dist', 'npm-shrinkwrap.json'],
   engines: { node: '>=22.13' },
   dependencies,
 };
 await writeFile(join(outDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 await copyFile(join(root, 'README.md'), join(outDir, 'README.md'));
 await copyFile(join(root, 'LICENSE'), join(outDir, 'LICENSE'));
+
+// T51: npm-shrinkwrap.json fixes every library version, direct and indirect, so an install
+// from npm gets exactly the tree the release run tested. No install scripts run here.
+execSync('npm install --package-lock-only --ignore-scripts --no-audit --no-fund', {
+  cwd: outDir,
+  stdio: 'inherit',
+});
+execSync('npm shrinkwrap', { cwd: outDir, stdio: 'inherit' });
 
 console.log(
   `agentnomad ${version}: ${String(bundled.length)} source files bundled, ${String(imported.size)} libraries as dependencies → ${outDir}`,

@@ -36,6 +36,8 @@ export interface CollectOptions {
    * (T42: Claude Code's claude.ai skills). Opt-in; global setup only.
    */
   readonly includeAccountSkills?: boolean;
+  /** Told about each file left out, with why (T45: a link to a refused place, a huge file). */
+  readonly onSkipped?: (bundlePath: string, reason: string) => void;
 }
 
 /** Which files belong to a setup. Never collects credentials or machine state (T25, T26). */

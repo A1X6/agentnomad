@@ -36,8 +36,14 @@ export const PluginManifestSchema = z.strictObject({
   marketplaces: z.array(
     z.strictObject({
       name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-      // Passed to `claude plugin marketplace add`; never an option or a local path.
-      add: z.string().regex(/^[^\s-][^\s"'`&|<>^%;]*$/),
+      // Passed to `claude plugin marketplace add`: only the forms push writes (a GitHub
+      // `owner/repo`, an https or git@ URL, each with an optional `#ref`), so never an
+      // option, a local path or plain http (T44).
+      add: z
+        .string()
+        .regex(
+          /^([A-Za-z0-9][\w.-]*\/[\w.-]+|https:\/\/[^\s"'`&|<>^%;]+|git@[^\s"'`&|<>^%;]+)(#[^\s"'`&|<>^%;]+)?$/,
+        ),
     }),
   ),
   plugins: z.array(

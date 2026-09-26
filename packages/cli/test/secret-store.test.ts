@@ -190,6 +190,41 @@ describe('createSecretStore', () => {
     });
   });
 
+  it('moves a login left in the file into the keychain once it works again (T46)', async () => {
+    // A run while the keychain was locked saved the login in the file.
+    const fallback = await createSecretStore({ ...input(), keychain: noKeychain });
+    await fallback.set('session-token', 'token');
+    await fallback.set('data-key', 'key');
+    const keychain = memoryKeychain();
+    const store = await createSecretStore({ ...input(), keychain: keychain.factory });
+    expect(store.backend).toBe('keychain');
+    expect(await store.get('session-token')).toBe('token');
+    expect(await store.get('data-key')).toBe('key');
+    // And the plain-text copy is gone.
+    const file = createFileStore({
+      path: join(configDir(input()), 'secrets.json'),
+      server: SERVER,
+      restrictAccess: () => Promise.resolve(),
+    });
+    expect(await file.get('data-key')).toBeNull();
+  });
+
+  it('on Windows, gives only this user access to the file (T46)', async () => {
+    const restricted: string[] = [];
+    const store = createFileStore({
+      path: join(dir, 'secrets.json'),
+      server: SERVER,
+      platform: 'win32',
+      restrictAccess: (file) => {
+        restricted.push(file);
+        return Promise.resolve();
+      },
+    });
+    await store.set('data-key', 'key');
+    expect(restricted).toHaveLength(1);
+    expect(restricted[0]).toMatch(/secrets\.json\.[0-9a-f]+\.tmp$/);
+  });
+
   it('falls back when the keychain fails to read (e.g. locked, no D-Bus)', async () => {
     const failing: KeychainEntryFactory = () => ({
       getPassword: () => Promise.reject(new Error('no storage access')),

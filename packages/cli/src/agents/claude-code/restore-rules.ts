@@ -7,6 +7,7 @@
 import { posix } from 'node:path';
 
 import { BundlePathSchema } from '@agentnomad/contracts';
+import { windowsNameProblem } from '@agentnomad/core';
 
 import { ENV_BUNDLE_PATH } from '../../env/env-section.ts';
 import { commandsInSettings, commandWords } from './file-gathering.ts';
@@ -21,8 +22,8 @@ import {
   PLUGINS_BUNDLE_PATH,
   PROGRAMS_BUNDLE_PATH,
   RESERVED_DIR,
+  homePathProblem,
   SCRIPT_EXTENSIONS,
-  SENSITIVE_HOME_DIRS,
   TOOL_CONFIG_FILES,
 } from './global-paths.ts';
 import { ACCOUNT_SKILLS_PREFIX } from './account-skills.ts';
@@ -34,6 +35,8 @@ import {
   PROJECT_NEVER_SYNCED,
   PROJECT_ROOT_FILES,
 } from './project-paths.ts';
+
+export { windowsNameProblem };
 
 /** Where a bundle entry belongs, or why it is refused. */
 export type RestoreDestination =
@@ -50,47 +53,23 @@ export type RestoreDestination =
   | { readonly kind: 'refused'; readonly reason: string };
 
 const under = (path: string, folder: string) => path === folder || path.startsWith(`${folder}/`);
+/** For refusals: Windows and macOS ignore case, so `Plugins/…` is `plugins/…` there (T43). */
+const underAnyCase = (path: string, folder: string) =>
+  under(path.toLowerCase(), folder.toLowerCase());
 const extensionOf = (path: string) => /(\.[^./]+)$/.exec(path)?.[1]?.toLowerCase() ?? '';
 const isScript = (path: string) => SCRIPT_EXTENSIONS.has(extensionOf(path));
 
 const refused = (reason: string): RestoreDestination => ({ kind: 'refused', reason });
 
-/** Names Windows keeps for devices, in any folder and with any extension (`nul.txt`). */
-const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
-
-/** Control characters and `< > " | ? *`, which Windows file names cannot contain. */
-function hasWindowsForbiddenCharacter(name: string): boolean {
-  for (let index = 0; index < name.length; index += 1) {
-    if (name.charCodeAt(index) < 0x20 || '<>"|?*'.includes(name.charAt(index))) return true;
-  }
-  return false;
-}
-
-/**
- * Why a bundle path cannot be written safely on Windows (T38), or `null`: a `:` would write
- * a hidden alternate data stream, device names (`CON`, `NUL`, …) reach a device, and a
- * trailing dot or space is dropped, so the file lands under another name.
- */
-export function windowsNameProblem(path: string): string | null {
-  for (const segment of path.split('/')) {
-    if (segment.includes(':')) return 'a name with ":" cannot be written on Windows';
-    if (hasWindowsForbiddenCharacter(segment)) return 'a name Windows does not allow';
-    if (WINDOWS_DEVICE.test(segment)) return 'a name Windows keeps for devices';
-    if (/[. ]$/.test(segment)) return 'a name ending in a dot or space on Windows';
-  }
-  return null;
-}
-
 /**
  * Home files a bundle may restore: known tool settings, or scripts that the setup's own hooks
  * or status line run (`hookScripts`, T38). Any other file could be one that runs by itself
- * (a Startup folder, a shell or PowerShell profile) without ever being shown for review.
+ * (a Startup folder, a shell or PowerShell profile) without ever being shown for review; those
+ * places are refused even when a hook names them (T43).
  */
 function homeDestination(relative: string, hookScripts: ReadonlySet<string>): RestoreDestination {
-  const lower = relative.toLowerCase();
-  if (SENSITIVE_HOME_DIRS.some((dir) => under(lower, dir.toLowerCase()))) {
-    return refused('a folder for keys and logins');
-  }
+  const problem = homePathProblem(relative);
+  if (problem !== null) return refused(problem);
   const toolSettings = Object.values(TOOL_CONFIG_FILES).flat();
   if (toolSettings.includes(relative) || hookScripts.has(HOME_SCRIPTS_PREFIX + relative))
     return { kind: 'home', path: relative };
@@ -115,8 +94,8 @@ export function globalDestination(
   if (path.startsWith(HOME_SCRIPTS_PREFIX)) {
     return homeDestination(path.slice(HOME_SCRIPTS_PREFIX.length), hookScripts);
   }
-  if (under(path, RESERVED_DIR)) return refused('unknown agentnomad entry');
-  if (NEVER_SYNCED.some((entry) => under(path, entry))) return refused('never synced');
+  if (underAnyCase(path, RESERVED_DIR)) return refused('unknown agentnomad entry');
+  if (NEVER_SYNCED.some((entry) => underAnyCase(path, entry))) return refused('never synced');
 
   const allowed =
     GLOBAL_FILES.includes(path) ||
@@ -158,9 +137,14 @@ export function projectDestination(
   if (!BundlePathSchema.safeParse(path).success) return refused('not a safe path');
   if (path === PLUGINS_BUNDLE_PATH || path === ENV_BUNDLE_PATH) return { kind: 'metadata' };
   if (path.startsWith(`${AUTO_MEMORY_BUNDLE_PREFIX}/`)) {
+    // Auto memory is Markdown notes (T43): nothing else, so no script or startup file.
+    if (extensionOf(path) !== '.md') return refused('auto memory holds only Markdown files');
     return { kind: 'auto-memory', path: path.slice(AUTO_MEMORY_BUNDLE_PREFIX.length + 1) };
   }
-  if (PROJECT_NEVER_SYNCED.some((entry) => under(path, entry))) return refused('never synced');
+  if (underAnyCase(path, RESERVED_DIR)) return refused('unknown agentnomad entry');
+  if (PROJECT_NEVER_SYNCED.some((entry) => underAnyCase(path, entry))) {
+    return refused('never synced');
+  }
 
   const claudeFolders = [...PROJECT_CLAUDE_FOLDERS, ...PROJECT_MEMORY_FOLDERS];
   const allowed =

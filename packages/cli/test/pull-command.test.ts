@@ -16,7 +16,10 @@ import {
   createClaudeCodeAdapter,
   createLocalState,
   createPullCommand,
+  createNoTerminalPrompter,
+  listAllBundles,
   createPushCommand,
+  AnswerNeededError,
   MislabelledSetupError,
   SetupUnreadableError,
   type AgentAdapter,
@@ -156,10 +159,11 @@ function pushFrom(
   machine: ReturnType<typeof pc>,
   server: ReturnType<typeof fakeServer>,
   answers: unknown[],
+  options: { prompter?: Prompter; reporter?: Reporter } = {},
 ) {
   return createPushCommand({
-    prompter: scripted(answers).prompter,
-    reporter: recorder().reporter,
+    prompter: options.prompter ?? scripted(answers).prompter,
+    reporter: options.reporter ?? recorder().reporter,
     registry: () => createAgentRegistry([claudeAdapter(machine.home)]),
     secrets: () => Promise.resolve(loggedIn()),
     api: () => server.api,
@@ -182,7 +186,12 @@ function pullOn(
   machine: ReturnType<typeof pc>,
   server: ReturnType<typeof fakeServer>,
   answers: unknown[],
-  options: { adapter?: AgentAdapter; secrets?: SecretStore; writer?: EnvWriter } = {},
+  options: {
+    adapter?: AgentAdapter;
+    secrets?: SecretStore;
+    writer?: EnvWriter;
+    prompter?: Prompter;
+  } = {},
 ) {
   const script = scripted(answers);
   const { reporter, lines } = recorder();
@@ -192,7 +201,7 @@ function pullOn(
     platform: process.platform,
   });
   const pull = createPullCommand({
-    prompter: script.prompter,
+    prompter: options.prompter ?? script.prompter,
     reporter,
     registry: () => createAgentRegistry([options.adapter ?? claudeAdapter(machine.home)]),
     secrets: () => Promise.resolve(options.secrets ?? loggedIn()),
@@ -420,6 +429,55 @@ describe('agentnomad pull (T34 done-when: restores on a second machine)', () => 
     expect(await asked.state.revisionOf('claude-code', scopeKey)).toBe(1);
   });
 
+  it('without a terminal, a question left open stops pull before anything is written (T46)', async () => {
+    const { server } = await pushedSetup();
+    const b = pc('desktop');
+    // The project already has its own, different CLAUDE.md: that needs --merge or --overwrite.
+    await put(join(b.project, 'CLAUDE.md'), 'mine');
+    const t = pullOn(b, server, [], { prompter: createNoTerminalPrompter() });
+    await expect(
+      t.pull({ global: true, project: 'my-app', yes: false, allowCommands: true }),
+    ).rejects.toBeInstanceOf(AnswerNeededError);
+    // Not even the global setup, which comes first and has no question of its own.
+    await expect(readFile(join(b.base, 'CLAUDE.md'))).rejects.toThrow();
+    expect(await t.state.revisionOf('claude-code', 'global')).toBeNull();
+  });
+
+  it('a pull that left out declined commands is remembered; push then asks (T46)', async () => {
+    const { server } = await pushedSetup();
+    const b = pc('desktop');
+    const t = pullOn(b, server, [false]);
+    await t.pull({ global: true, yes: false });
+    expect(await t.state.isPartial('claude-code', 'global')).toBe(true);
+
+    // --yes never pushes over them.
+    const { reporter, lines } = recorder();
+    await pushFrom(b, server, [], { reporter })({ global: true, yes: true, memory: false });
+    expect(server.stored.get('claude-code/global')?.revision).toBe(1);
+    expect(lines.some((line) => line.includes('left out commands you declined'))).toBe(true);
+
+    // Asked, and a yes pushes; afterwards this PC's copy is complete again.
+    await pushFrom(b, server, [true])({ global: true, yes: false, memory: false });
+    expect(server.stored.get('claude-code/global')?.revision).toBe(2);
+    expect(await t.state.isPartial('claude-code', 'global')).toBe(false);
+  });
+
+  it('without a terminal, push finds a newer copy on the server before uploading (T46)', async () => {
+    const { server, a } = await pushedSetup();
+    const b = pc('desktop');
+    await pullOn(b, server, []).pull({ global: true, yes: true, allowCommands: true });
+    await pushFrom(a, server, [])({ global: true, yes: true, memory: false });
+    expect(server.stored.get('claude-code/global')?.revision).toBe(2);
+    await expect(
+      pushFrom(b, server, [], { prompter: createNoTerminalPrompter() })({
+        global: true,
+        yes: false,
+        memory: false,
+      }),
+    ).rejects.toBeInstanceOf(AnswerNeededError);
+    expect(server.stored.get('claude-code/global')?.revision).toBe(2);
+  });
+
   it('says so when nothing is saved', async () => {
     const t = pullOn(pc('desktop'), fakeServer(), []);
     await t.pull(none);
@@ -500,5 +558,21 @@ describe('agentnomad pull (T34 done-when: restores on a second machine)', () => 
     await pullOn(b, server, [], { adapter, writer }).pull({ global: true, yes: true });
     expect(followUps[0]).toContain('.agentnomad/env.json');
     expect(written).toEqual([{ GITHUB_TOKEN: 'ghp_secret' }]);
+  });
+});
+
+describe('listing saved setups stops on a server that never ends (T46)', () => {
+  it('refuses a cursor it has already seen', async () => {
+    let calls = 0;
+    const api = {
+      bundles: {
+        list: () => {
+          calls += 1;
+          return Promise.resolve({ items: [], nextCursor: 'same' });
+        },
+      },
+    } as unknown as ApiClient;
+    await expect(listAllBundles(api)).rejects.toThrow('kept sending more pages');
+    expect(calls).toBe(2);
   });
 });

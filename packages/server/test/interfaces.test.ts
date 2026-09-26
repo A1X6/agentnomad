@@ -30,6 +30,8 @@ function statusFor(result: PutMetaResult): number {
       return 200;
     case 'conflict':
       return 409;
+    case 'over-limit':
+      return 413;
   }
 }
 

@@ -38,14 +38,21 @@ already compromised PC, and denial of service by volume.
 - **Bound bundles.** Each bundle is bound to its agent, scope and format, and carries its
   revision inside the encryption, so a server cannot swap one setup for another or pass an
   older copy off as the latest.
-- **Nothing runs unseen.** Pull lists new or changed hooks, status line commands, MCP servers
-  and the scripts they run before writing them, and only restores files outside the agent's
-  folder that its own hooks run. `--yes` alone never accepts new commands or installs.
+- **Nothing runs unseen.** Pull lists everything new or changed that Claude Code would run
+  before writing it: hooks, status line commands, settings that run a command (such as
+  `apiKeyHelper`), MCP servers (their whole definition), the scripts they run, and skills,
+  commands or subagents with commands that run by themselves. It only restores files outside
+  the agent's folder that its own hooks run, never into a Startup, autostart or shell-profile
+  folder. `--yes` alone never accepts new commands, installs, or environment values that make
+  programs load code; `--allow-commands` does.
 - **Local secrets in the OS keychain,** or in a file only your user can read where there is
-  no keychain.
+  no keychain (on Windows with an access list for your user only).
+- **Limits on the server.** Each account keeps at most 100 setups and 50 MB, with limits on
+  saves, logins and account deletes, so one account cannot fill the service or guess passwords
+  quickly.
 - **Checked on every change.** Automated tests on macOS, Linux and Windows record every
-  request the CLI makes and fail if anything readable (a password, file contents, a project
-  name) is in it.
+  request the CLI makes and fail if anything readable (a password, the data key, file
+  contents, a project name) is in it, also inside compressed or encoded data.
 
 **What the server can see:** your username, the device name (the PC's host name) of each
 login, and for each saved setup its agent, size, revision and times. **There is no password

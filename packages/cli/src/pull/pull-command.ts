@@ -1,9 +1,10 @@
-import { type BundleScope, type SourceOs } from '@agentnomad/contracts';
+import { type Bundle, type BundleScope, type SourceOs } from '@agentnomad/contracts';
 import { createPathResolver, type BundleCodec, type CryptoService } from '@agentnomad/core';
 
 import type {
   AgentAdapter,
   AgentRegistry,
+  CollectedFile,
   ConflictChoice,
   ConflictResolver,
   DetectedAgent,
@@ -20,6 +21,7 @@ import type { EnvWriter } from '../env/shell-profile.ts';
 import { fromBundleFiles, preferLocalEquivalents } from '../push/bundle-files.ts';
 import type { SecretStore } from '../secrets/secret-store.ts';
 import type { LocalState } from '../state/local-state.ts';
+import { AnswerNeededError } from '../ui/no-terminal-prompter.ts';
 import type { Prompter, Reporter } from '../ui/prompter.ts';
 import { reviewRunnable } from './command-review.ts';
 import { downloadSetup, listSavedSetups, type SavedSetup } from './saved-setups.ts';
@@ -42,6 +44,23 @@ export interface PullDeps {
 }
 
 type ScopeChoice = 'global' | 'project' | 'both';
+
+/** A setup downloaded, checked and reviewed, ready to write. */
+interface Prepared {
+  readonly adapter: AgentAdapter;
+  readonly setup: SavedSetup;
+  readonly bundle: Bundle;
+  readonly revision: number;
+  readonly target: ScopeTarget;
+  readonly files: CollectedFile[];
+  /** What this PC has now, as the collector sees it. */
+  readonly current: readonly CollectedFile[];
+  /** The user declined commands it holds, so they were left out. */
+  readonly declined: boolean;
+}
+
+const sameBytes = (a: Uint8Array, b: Uint8Array) =>
+  a.byteLength === b.byteLength && a.every((byte, index) => byte === b[index]);
 type ConflictAnswer = ConflictChoice | 'merge-all' | 'overwrite-all';
 
 const sourceOsOf = (platform: NodeJS.Platform): SourceOs =>
@@ -196,18 +215,19 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
     };
   }
 
-  async function restoreOne(
+  /**
+   * Everything about one setup that comes before writing: download and check it, and ask
+   * about an older copy and about what would run programs (T46: all setups are prepared
+   * before any is written, so a question left open stops pull before it changes anything).
+   * `null`: the user chose to skip it.
+   */
+  async function prepareOne(
     adapter: AgentAdapter,
     version: string | null,
     setup: SavedSetup,
-    context: {
-      secrets: SecretStore;
-      crypto: CryptoService;
-      dataKey: Uint8Array;
-      resolver: ConflictResolver;
-    },
+    context: { secrets: SecretStore; crypto: CryptoService; dataKey: Uint8Array },
     options: PullOptions,
-  ): Promise<void> {
+  ): Promise<Prepared | null> {
     const spinner = reporter.spinner();
     spinner.start(`Downloading and decrypting the ${describe(adapter, setup)}…`);
     let downloaded;
@@ -233,7 +253,7 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
       reporter.warn(note);
       if (options.yes || !(await prompter.confirm('Restore this older copy anyway?', false))) {
         reporter.info(`Skipped the ${describe(adapter, setup)}.`);
-        return;
+        return null;
       }
     }
 
@@ -251,6 +271,7 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
     const current = await adapter.collector.collect(target, { includeMemory: true });
     files = preferLocalEquivalents(bundle.files, files, current, resolver);
     const review = reviewRunnable(files, current);
+    let declined = false;
     if (review.length > 0) {
       reporter.info(
         [
@@ -266,6 +287,7 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
         options.allowCommands === true ||
         (!options.yes && (await prompter.confirm('Allow them?', false)));
       if (!allow) {
+        declined = true;
         const blocked = new Set(review.map((entry) => entry.file));
         files = files.filter((file) => !blocked.has(file.path));
         reporter.warn(
@@ -274,7 +296,41 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
       }
     }
 
-    const report = await adapter.restorer.restore(target, files, context.resolver, {
+    return { adapter, setup, bundle, revision, target, files, current, declined };
+  }
+
+  /**
+   * Without a terminal (T46): every question the flags leave open is found before anything is
+   * written. A file that differs here needs --merge, --overwrite or --yes; saved environment
+   * values missing here need --yes.
+   */
+  function checkAnswerable(prepared: readonly Prepared[], options: PullOptions): void {
+    if (prompter.canAsk !== false || options.yes) return;
+    for (const { files, current } of prepared) {
+      if (options.conflict === undefined) {
+        const differs = files.find((file) => {
+          const here = current.find((entry) => entry.path === file.path);
+          return here !== undefined && !sameBytes(here.content, file.content);
+        });
+        if (differs) {
+          throw new AnswerNeededError(`${differs.path} already exists here and is different.`);
+        }
+      }
+      const envFile = files.find((file) => file.path === ENV_BUNDLE_PATH);
+      const section = envFile ? parseEnvSection(envFile.content) : null;
+      const missing = Object.keys(section?.variables ?? {}).filter(
+        (name) => (deps.env[name] ?? '') === '',
+      );
+      if (missing.length > 0) throw new AnswerNeededError(`Add ${missing.join(', ')}?`);
+    }
+  }
+
+  async function applyOne(
+    { adapter, setup, bundle, revision, target, files, declined }: Prepared,
+    resolverOfConflicts: ConflictResolver,
+    options: PullOptions,
+  ): Promise<void> {
+    const report = await adapter.restorer.restore(target, files, resolverOfConflicts, {
       sourceOs: bundle.sourceOs,
       assumeYes: options.yes,
     });
@@ -288,7 +344,10 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
       `Restored the ${describe(adapter, setup)}: ${parts.join(', ')} (revision ${String(revision)}).`,
     );
 
-    await deps.localState().setRevision(adapter.id, setup.scopeKey, revision);
+    // Declined commands are noted, so a later push asks before dropping them (T46).
+    await deps
+      .localState()
+      .setRevision(adapter.id, setup.scopeKey, revision, { partial: declined });
     if (setup.projectName !== null)
       await deps.localState().rememberProject(deps.cwd, setup.projectName);
 
@@ -312,6 +371,7 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
         prompter,
         reporter,
         assumeYes: options.yes,
+        allowCommands: options.allowCommands === true,
       });
     }
   }
@@ -354,18 +414,22 @@ export function createPullCommand(deps: PullDeps): Pick<CommandHandlers, 'pull'>
           }
         }
 
-        const resolver = conflictResolver(options);
+        const prepared: Prepared[] = [];
         for (const { adapter, version, setups } of plan) {
           for (const setup of setups) {
-            await restoreOne(
+            const ready = await prepareOne(
               adapter,
               version,
               setup,
-              { secrets, crypto, dataKey, resolver },
+              { secrets, crypto, dataKey },
               options,
             );
+            if (ready) prepared.push(ready);
           }
         }
+        checkAnswerable(prepared, options);
+        const resolver = conflictResolver(options);
+        for (const ready of prepared) await applyOne(ready, resolver, options);
       } finally {
         dataKey.fill(0);
       }

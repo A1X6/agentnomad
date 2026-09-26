@@ -51,19 +51,42 @@ export class MislabelledSetupError extends Error {
 }
 
 /** Every saved setup of the account (all pages), names decrypted; unreadable names are left out. */
+/** Pages of 100: far more than one person saves, and a stop for a server that never ends. */
+const MAX_PAGES = 100;
+
+/**
+ * Every saved setup's metadata, page by page (T46): stops at a repeated cursor or after
+ * MAX_PAGES, so a broken or hostile server cannot keep the CLI listing forever.
+ */
+export async function listAllBundles(api: ApiClient): Promise<BundleSummary[]> {
+  const items: BundleSummary[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const result = await api.bundles.list(
+      cursor === null ? { limit: 100 } : { cursor, limit: 100 },
+    );
+    items.push(...result.items);
+    cursor = result.nextCursor;
+    if (cursor === null) return items;
+    if (seen.has(cursor)) break;
+    seen.add(cursor);
+  }
+  throw new Error('The server kept sending more pages of saved setups; try again later.');
+}
+
+/** `<agent>/<scopeKey>` → its revision on the server, for push's checks (T46). */
+export async function listSavedRevisions(api: ApiClient): Promise<Map<string, number>> {
+  const items = await listAllBundles(api);
+  return new Map(items.map((item) => [`${item.agent}/${item.scopeKey}`, item.revision]));
+}
+
 export async function listSavedSetups(
   api: ApiClient,
   crypto: CryptoService,
   dataKey: Uint8Array,
 ): Promise<SavedSetup[]> {
-  const items: BundleSummary[] = [];
-  let cursor: string | null = null;
-  do {
-    const page = await api.bundles.list(cursor === null ? { limit: 100 } : { cursor, limit: 100 });
-    items.push(...page.items);
-    cursor = page.nextCursor;
-  } while (cursor !== null);
-
+  const items = await listAllBundles(api);
   const setups: SavedSetup[] = [];
   for (const item of items) {
     let projectName: string | null = null;

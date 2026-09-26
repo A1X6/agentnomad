@@ -157,6 +157,21 @@ const RAW = {
     '.password-store',
   ],
 
+  /**
+   * Home folders the OS or a shell runs files from by itself (T43): never written, even when
+   * a hook names a file there, since the file would keep running after the hook is removed.
+   * Matched anywhere in a path too (a Documents folder moved into OneDrive).
+   */
+  autostartHomeDirs: [
+    'AppData/Roaming/Microsoft/Windows/Start Menu',
+    'Documents/PowerShell',
+    'Documents/WindowsPowerShell',
+    '.config/powershell',
+    '.config/autostart',
+    '.config/fish',
+    'Library/LaunchAgents',
+  ],
+
   /** Settings files of known status line and hook tools, from the home folder. */
   toolConfigFiles: { ccstatusline: ['.config/ccstatusline/settings.json'] },
 
@@ -232,6 +247,7 @@ const PathsDataSchema = z.strictObject({
   claudeJsonPreferenceKeys: names,
   scriptExtensions: z.array(z.string().regex(/^\.[a-z0-9]+$/)),
   sensitiveHomeDirs: names,
+  autostartHomeDirs: names,
   toolConfigFiles: z.record(z.string(), names),
   runtimeCommands: names,
   packageRunners: names,

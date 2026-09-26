@@ -21,7 +21,11 @@ import type {
 import { hookScripts } from './hook-scripts.ts';
 import { findAutoMemory } from './auto-memory.ts';
 import { commandsInSettings, commandWords, createFileGatherer } from './file-gathering.ts';
-import { CLAUDE_JSON_BUNDLE_PATH, CLAUDE_JSON_MCP_KEY } from './global-paths.ts';
+import {
+  CLAUDE_JSON_BUNDLE_PATH,
+  CLAUDE_JSON_MCP_KEY,
+  CLAUDE_JSON_PREFERENCE_KEYS,
+} from './global-paths.ts';
 import { ClaudeJsonError } from './global-collector.ts';
 import {
   globalDestination,
@@ -109,6 +113,15 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
     return new Uint8Array(await readFile(nativePath));
   }
 
+  /** `''` when nothing is at `nativePath`, else the first free `-2`, `-3`, … (T45). */
+  async function freeSuffix(nativePath: string): Promise<string> {
+    const taken = async (candidate: string) => (await stat(candidate).catch(() => null)) !== null;
+    if (!(await taken(nativePath))) return '';
+    for (let number = 2; ; number += 1) {
+      if (!(await taken(`${nativePath}-${String(number)}`))) return `-${String(number)}`;
+    }
+  }
+
   /** Writes to a temporary file and swaps it in, so a crash never leaves half a file. */
   async function writeAtomically(nativePath: string, content: Uint8Array, mode: number | null) {
     await mkdir(path.dirname(nativePath), { recursive: true });
@@ -158,33 +171,26 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
     }
   }
 
-  /** Merges the selected keys into `~/.claude.json`, keeping everything else in it. */
-  async function mergeClaudeJson(
-    file: CollectedFile,
-    onConflict: ConflictResolver,
-    report: MutableReport,
-    assumeYes: boolean,
-  ): Promise<void> {
-    const incoming = z
-      .record(z.string(), z.unknown())
-      .parse(JSON.parse(new TextDecoder().decode(file.content)));
+  /** `~/.claude.json` as it is now, parsed: `existing` is `null` when missing. */
+  async function readClaudeJson() {
     const existing = await readExisting(claudeJsonFile);
-    if (existing === 'folder') {
-      report.skipped.push(file.path);
-      return;
+    if (existing === null || existing === 'folder') return { existing, current: {} };
+    try {
+      const current = z
+        .record(z.string(), z.unknown())
+        .parse(JSON.parse(new TextDecoder().decode(existing)));
+      return { existing, current };
+    } catch (error) {
+      throw new ClaudeJsonError(claudeJsonFile, { cause: error });
     }
-    let current: Record<string, unknown> = {};
-    if (existing !== null) {
-      try {
-        current = z
-          .record(z.string(), z.unknown())
-          .parse(JSON.parse(new TextDecoder().decode(existing)));
-      } catch (error) {
-        throw new ClaudeJsonError(claudeJsonFile, { cause: error });
-      }
-    }
-    // Servers merge by name (incoming wins); preference keys are replaced. A Map keeps a
-    // key named "__proto__" plain data.
+  }
+
+  /**
+   * `current` with the incoming keys merged in: servers by name (incoming wins), preference
+   * keys replaced. A Map keeps a key named "__proto__" plain data. `unchanged` compares the
+   * keys, not the bytes, since Claude Code formats the file its own way.
+   */
+  function mergeInto(current: Record<string, unknown>, incoming: Record<string, unknown>) {
     const merged = new Map(Object.entries(current));
     for (const [key, value] of Object.entries(incoming)) {
       const before = merged.get(key);
@@ -195,17 +201,43 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
           : value,
       );
     }
-    // Claude Code formats the file its own way, so compare the keys, not the bytes.
-    const unchanged =
-      existing !== null &&
-      Object.keys(incoming).every(
-        (key) => JSON.stringify(current[key]) === JSON.stringify(merged.get(key)),
-      );
-    if (unchanged) return;
-    const content = new TextEncoder().encode(
-      `${JSON.stringify(Object.fromEntries(merged), null, 2)}\n`,
+    const unchanged = Object.keys(incoming).every(
+      (key) => JSON.stringify(current[key]) === JSON.stringify(merged.get(key)),
     );
-    if (existing !== null) {
+    return { merged, unchanged };
+  }
+
+  /**
+   * Merges the selected keys into `~/.claude.json`, keeping everything else in it. Only the
+   * keys push saves are taken (T43): the MCP servers and the preference keys. Anything else,
+   * such as `projects` (local MCP servers and folder trust) or account state, is left out.
+   */
+  async function mergeClaudeJson(
+    file: CollectedFile,
+    onConflict: ConflictResolver,
+    report: MutableReport,
+    assumeYes: boolean,
+  ): Promise<void> {
+    const parsed = z
+      .record(z.string(), z.unknown())
+      .parse(JSON.parse(new TextDecoder().decode(file.content)));
+    const allowed = new Set([CLAUDE_JSON_MCP_KEY, ...CLAUDE_JSON_PREFERENCE_KEYS]);
+    const incoming = Object.fromEntries(Object.entries(parsed).filter(([key]) => allowed.has(key)));
+    const ignored = Object.keys(parsed).filter((key) => !allowed.has(key));
+    if (ignored.length > 0) {
+      report.warnings.push(
+        `Left out of ${claudeJsonFile}: ${ignored.map((key) => JSON.stringify(key)).join(', ')} (only MCP servers and preferences are restored there).`,
+      );
+    }
+    if (Object.keys(incoming).length === 0) return;
+
+    const before = await readClaudeJson();
+    if (before.existing === 'folder') {
+      report.skipped.push(file.path);
+      return;
+    }
+    if (before.existing !== null) {
+      if (mergeInto(before.current, incoming).unchanged) return;
       const choice = await onConflict(CLAUDE_JSON_BUNDLE_PATH, { overwriteAllowed: false });
       if (choice === 'skip') {
         report.skipped.push(file.path);
@@ -222,9 +254,21 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
         return;
       }
     }
+    // Read again now that Claude Code is closed: it may have saved the file meanwhile (T43).
+    const { existing, current } = await readClaudeJson();
+    if (existing === 'folder') {
+      report.skipped.push(file.path);
+      return;
+    }
+    const { merged, unchanged } = mergeInto(current, incoming);
+    if (existing !== null && unchanged) return;
+    const content = new TextEncoder().encode(
+      `${JSON.stringify(Object.fromEntries(merged), null, 2)}\n`,
+    );
     const mode = existing === null ? 0o600 : (await stat(claudeJsonFile)).mode & 0o777;
     if (existing !== null) {
-      const backup = `${claudeJsonFile}${BACKUP_MARKER}${stamp(options.now?.() ?? new Date())}`;
+      const name = `${claudeJsonFile}${BACKUP_MARKER}${stamp(options.now?.() ?? new Date())}`;
+      const backup = name + (await freeSuffix(name));
       await writeAtomically(backup, existing, mode);
       report.backups.push(backup);
     }
@@ -267,35 +311,31 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
           report.warnings.push(
             location.kind === 'shared'
               ? 'Auto memory was not restored: autoMemoryDirectory in your user settings is shared by every project.'
-              : 'Auto memory was not restored: this project path is too long to find its memory folder.',
+              : location.kind === 'refused'
+                ? `Auto memory was not restored to ${location.dir}, the folder autoMemoryDirectory names: ${location.reason}.`
+                : 'Auto memory was not restored: this project path is too long to find its memory folder.',
           );
           return null;
         })());
 
-      for (const file of [...incoming].sort((a, b) => (a.path < b.path ? -1 : 1))) {
+      /** Writes one entry; a problem with it is thrown and reported by the loop below. */
+      async function restoreEntry(file: CollectedFile): Promise<void> {
         const destination = destinationOf(file.path);
         if (destination.kind === 'refused') {
           report.skipped.push(file.path);
           report.warnings.push(`Refused "${file.path}": ${destination.reason}.`);
-          continue;
+          return;
         }
-        if (destination.kind === 'metadata') continue;
+        if (destination.kind === 'metadata') return;
         if (destination.kind === 'claude-json') {
           await mergeClaudeJson(file, onConflict, report, context.assumeYes === true);
-          continue;
+          return;
         }
 
-        let nativePath: string | null;
-        try {
-          nativePath = await nativePathOf(target, destination, memoryDir);
-        } catch (error) {
-          report.skipped.push(file.path);
-          report.warnings.push(`Skipped "${file.path}": ${(error as Error).message}.`);
-          continue;
-        }
+        const nativePath = await nativePathOf(target, destination, memoryDir);
         if (nativePath === null) {
           report.skipped.push(file.path);
-          continue;
+          return;
         }
 
         const content = lineEndingsFor(options.platform, file.path, file.content);
@@ -303,7 +343,7 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
         if (existing === 'folder') {
           report.skipped.push(file.path);
           report.warnings.push(`Skipped "${file.path}": a folder with that name exists.`);
-          continue;
+          return;
         }
         const existingMode = existing === null ? null : (await stat(nativePath)).mode & 0o777;
 
@@ -311,12 +351,12 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
         if (existing === null) {
           writes = [{ path: file.path, content }];
         } else if (sameBytes(existing, content)) {
-          continue;
+          return;
         } else {
           const choice = await onConflict(file.path, { overwriteAllowed: true });
           if (choice === 'skip') {
             report.skipped.push(file.path);
-            continue;
+            return;
           }
           writes = selectMergeStrategy(strategies, choice, file.path).resolve({
             path: file.path,
@@ -326,16 +366,46 @@ export function createClaudeCodeRestorer(options: RestorerOptions): Restorer {
         }
 
         for (const write of writes) {
-          // Backups and side-by-side copies sit next to the file, with a marker suffix.
-          const writePath = nativePath + write.path.slice(file.path.length);
+          // Backups and side-by-side copies sit next to the file, with a marker suffix; a
+          // name already taken (two pulls in one second) gets a number, never replaced (T45).
           const replacing = write.path === file.path;
+          const suffix = replacing
+            ? ''
+            : await freeSuffix(nativePath + write.path.slice(file.path.length));
+          const writePath = nativePath + write.path.slice(file.path.length) + suffix;
           await writeAtomically(
             writePath,
             write.content,
             replacing ? modeFor(file, write.content, existingMode) : existingMode,
           );
-          if (write.path.includes(BACKUP_MARKER)) report.backups.push(write.path);
-          else report.written.push(write.path);
+          if (write.path.includes(BACKUP_MARKER)) report.backups.push(write.path + suffix);
+          else report.written.push(write.path + suffix);
+        }
+      }
+
+      // Windows and macOS ignore case and Unicode form, so two entries a Linux PC keeps apart
+      // (`Notes.md`, `notes.md`) would land on one file here: only the first is written (T43).
+      const foldsNames = options.platform === 'win32' || options.platform === 'darwin';
+      const seen = new Map<string, string>();
+      for (const file of [...incoming].sort((a, b) => (a.path < b.path ? -1 : 1))) {
+        if (foldsNames) {
+          const folded = file.path.normalize('NFC').toLowerCase();
+          const first = seen.get(folded);
+          if (first !== undefined) {
+            report.skipped.push(file.path);
+            report.warnings.push(
+              `Skipped "${file.path}": on this PC it is the same file as "${first}".`,
+            );
+            continue;
+          }
+          seen.set(folded, file.path);
+        }
+        // One bad entry is skipped with a warning; it never stops the rest of the restore.
+        try {
+          await restoreEntry(file);
+        } catch (error) {
+          report.skipped.push(file.path);
+          report.warnings.push(`Skipped "${file.path}": ${(error as Error).message}.`);
         }
       }
 

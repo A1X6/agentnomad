@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { posix, win32 } from 'node:path';
 
 import { BACKUP_MARKER, INCOMING_MARKER } from '@agentnomad/core';
@@ -12,6 +12,7 @@ import {
   IGNORED_COPY_PATTERNS,
   NEVER_SYNCED,
 } from './global-paths.ts';
+import { hookScripts } from './hook-scripts.ts';
 import {
   PROJECT_CLAUDE_FILES,
   PROJECT_CLAUDE_FOLDERS,
@@ -24,6 +25,30 @@ export interface UnknownFilesInput {
   /** Claude Code's base folder (`~/.claude` or `CLAUDE_CONFIG_DIR`). */
   readonly baseDir: string;
   readonly platform: NodeJS.Platform;
+  /** The home folder, to find the scripts the hooks and status line run (T49). */
+  readonly homedir?: string;
+}
+
+/**
+ * Top-level names in the base folder that hold a script the global hooks or status line
+ * run (T49): push saves those scripts by that route (T25), so such a folder, e.g. `hooks/`,
+ * is not unknown. A folder with no such script is still reported.
+ */
+async function hookScriptNames(input: UnknownFilesInput): Promise<string[]> {
+  if (input.homedir === undefined) return [];
+  const path = input.platform === 'win32' ? win32 : posix;
+  const settings = await readFile(path.join(input.baseDir, 'settings.json'), 'utf8').catch(
+    () => null,
+  );
+  if (settings === null) return [];
+  return hookScripts(settings, {
+    homedir: input.homedir,
+    baseDir: input.baseDir,
+    platform: input.platform,
+  })
+    .map((script) => script.bundlePath)
+    .filter((bundlePath) => !bundlePath.startsWith('.agentnomad/'))
+    .map(topLevel);
 }
 
 /** The first part of a list entry: `skills/synced` → `skills`. */
@@ -79,8 +104,11 @@ export async function findUnknownEntries(
         ];
 
   const knownNames = new Set(known);
-  // `.claude.json` sits in the base folder when CLAUDE_CONFIG_DIR is set; it is handled apart.
-  if (target.kind === 'global') knownNames.add('.claude.json');
+  if (target.kind === 'global') {
+    // `.claude.json` sits in the base folder when CLAUDE_CONFIG_DIR is set; handled apart.
+    knownNames.add('.claude.json');
+    for (const name of await hookScriptNames(input)) knownNames.add(name);
+  }
 
   const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
   return entries

@@ -6,7 +6,12 @@ import { BundlePathSchema } from '@agentnomad/contracts';
 import * as z from 'zod';
 
 import type { CollectedFile } from '../adapter.ts';
-import { PACKAGE_RUNNERS, RUNTIME_COMMANDS, SKIPPED_NAMES } from './global-paths.ts';
+import {
+  isSensitiveHomePath,
+  PACKAGE_RUNNERS,
+  RUNTIME_COMMANDS,
+  SKIPPED_NAMES,
+} from './global-paths.ts';
 
 /** Reading files for a bundle; shared by the global (T25) and project (T26) collectors. */
 export interface FileGatherer {
@@ -31,14 +36,69 @@ export interface FileGatherer {
 const isMarkerCopy = (name: string) =>
   name.includes(BACKUP_MARKER) || name.includes(INCOMING_MARKER);
 
-export function createFileGatherer(platform: NodeJS.Platform): FileGatherer {
+/** A file larger than this is left out of a setup (T45): a setup is settings and text. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+/** Where links may lead when collecting (T45). */
+export interface GatherLimits {
+  /** The home folder: a link into a folder for keys and logins is never followed. */
+  readonly homedir?: string;
+  /**
+   * Links must stay inside this folder. For a project: a cloned repository could link
+   * `.claude/skills/x` to `~/.ssh`, and push would save the keys.
+   */
+  readonly within?: string;
+  /** Told about each file left out, with why, so push can say so. */
+  readonly onSkipped?: (bundlePath: string, reason: string) => void;
+}
+
+export function createFileGatherer(
+  platform: NodeJS.Platform,
+  limits: GatherLimits = {},
+): FileGatherer {
   const path = platform === 'win32' ? win32 : posix;
 
-  async function fileEntry(nativePath: string, bundlePath: string): Promise<CollectedFile> {
-    const [content, info] = await Promise.all([readFile(nativePath), stat(nativePath)]);
+  const relativeInside = (folder: string, file: string): string | null => {
+    const relative = path.relative(folder, file);
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) return null;
+    const bundlePath = relative.split(path.sep).join('/');
+    return BundlePathSchema.safeParse(bundlePath).success ? bundlePath : null;
+  };
+
+  const realOrSelf = (folder: string) => realpath(folder).catch(() => folder);
+  const realHome = limits.homedir === undefined ? null : realOrSelf(limits.homedir);
+  const realWithin = limits.within === undefined ? null : realOrSelf(limits.within);
+
+  /** Why the real file behind `nativePath` must not be read, or `null` (T45). */
+  async function linkProblem(nativePath: string): Promise<string | null> {
+    const real = await realpath(nativePath).catch(() => null);
+    if (real === null) return null;
+    if (realWithin !== null) {
+      const within = await realWithin;
+      if (real !== within && relativeInside(within, real) === null) {
+        return 'it links to a place outside the project';
+      }
+    }
+    if (realHome !== null) {
+      const fromHome = relativeInside(await realHome, real);
+      if (fromHome !== null && isSensitiveHomePath(fromHome)) {
+        return 'it links into a folder for keys and logins';
+      }
+    }
+    return null;
+  }
+
+  function skip(bundlePath: string, reason: string): null {
+    limits.onSkipped?.(bundlePath, reason);
+    return null;
+  }
+
+  async function fileEntry(nativePath: string, bundlePath: string) {
+    const info = await stat(nativePath);
+    if (info.size > MAX_FILE_BYTES) return skip(bundlePath, 'it is larger than 10 MB');
     return {
       path: bundlePath,
-      content: new Uint8Array(content),
+      content: new Uint8Array(await readFile(nativePath)),
       // Only macOS and Linux record "may run"; T27 decides per OS on restore.
       executable: platform !== 'win32' && (info.mode & 0o111) !== 0,
     };
@@ -46,7 +106,9 @@ export function createFileGatherer(platform: NodeJS.Platform): FileGatherer {
 
   async function readIfFile(nativePath: string, bundlePath: string) {
     const info = await stat(nativePath).catch(() => null);
-    return info?.isFile() ? fileEntry(nativePath, bundlePath) : null;
+    if (!info?.isFile()) return null;
+    const problem = await linkProblem(nativePath);
+    return problem === null ? fileEntry(nativePath, bundlePath) : skip(bundlePath, problem);
   }
 
   async function walk(
@@ -63,6 +125,11 @@ export function createFileGatherer(platform: NodeJS.Platform): FileGatherer {
     }
     if (seen.has(real)) return [];
     seen.add(real);
+    const problem = await linkProblem(folder);
+    if (problem !== null) {
+      skip(bundlePrefix, problem);
+      return [];
+    }
 
     const files: CollectedFile[] = [];
     for (const entry of await readdir(folder, { withFileTypes: true })) {
@@ -70,25 +137,20 @@ export function createFileGatherer(platform: NodeJS.Platform): FileGatherer {
       const bundlePath = `${bundlePrefix}/${entry.name}`;
       if (excluded(bundlePath) || !BundlePathSchema.safeParse(bundlePath).success) continue;
       const nativePath = path.join(folder, entry.name);
-      // stat follows links, so linked folders (e.g. from a dotfiles repo) come along.
+      // stat follows links, so linked folders (e.g. from a dotfiles repo) come along, as far
+      // as the limits allow.
       const info = await stat(nativePath).catch(() => null);
-      if (info?.isDirectory()) files.push(...(await walk(nativePath, bundlePath, excluded, seen)));
-      else if (info?.isFile()) files.push(await fileEntry(nativePath, bundlePath));
+      if (info?.isDirectory()) {
+        files.push(...(await walk(nativePath, bundlePath, excluded, seen)));
+      } else if (info?.isFile()) {
+        const file = await readIfFile(nativePath, bundlePath);
+        if (file) files.push(file);
+      }
     }
     return files;
   }
 
-  return {
-    path,
-    relativeInside(folder, file) {
-      const relative = path.relative(folder, file);
-      if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) return null;
-      const bundlePath = relative.split(path.sep).join('/');
-      return BundlePathSchema.safeParse(bundlePath).success ? bundlePath : null;
-    },
-    readIfFile,
-    walk,
-  };
+  return { path, relativeInside, readIfFile, walk };
 }
 
 /** One entry per path (the last wins), sorted by path. */

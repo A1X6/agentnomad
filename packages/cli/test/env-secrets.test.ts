@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -200,6 +200,37 @@ describe('writing the profile', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it('never replaces a profile it cannot read (T46)', async () => {
+    const profile = join(dir, '.bashrc');
+    await mkdir(profile);
+    await expect(
+      createShellProfileWriter({ path: profile, kind: 'posix', label: '~/.bashrc' }).write({
+        TOKEN: 'abc',
+      }),
+    ).rejects.toThrow();
+  });
+
+  it.runIf(posix)('writes through a linked profile, keeping the link (T46)', async () => {
+    const real = join(dir, 'dotfiles', 'bashrc');
+    await mkdir(join(dir, 'dotfiles'));
+    await writeFile(real, 'alias ll="ls -l"\n');
+    const profile = join(dir, '.bashrc');
+    await symlink(real, profile);
+    await createShellProfileWriter({ path: profile, kind: 'posix', label: '~/.bashrc' }).write({
+      TOKEN: 'abc',
+    });
+    expect((await lstat(profile)).isSymbolicLink()).toBe(true);
+    expect(await readFile(real, 'utf8')).toContain("export TOKEN='abc'");
+  });
+
+  it.runIf(posix)('a new profile is readable only by this user (T46)', async () => {
+    const profile = join(dir, '.profile');
+    await createShellProfileWriter({ path: profile, kind: 'posix', label: '~/.profile' }).write({
+      TOKEN: 'abc',
+    });
+    expect((await stat(profile)).mode & 0o777).toBe(0o600);
+  });
+
   it('backs the profile up before changing it', async () => {
     const profile = join(dir, '.bashrc');
     await writeFile(profile, 'alias ll="ls -l"\n');
@@ -263,7 +294,11 @@ describe('restoring values on pull', () => {
       env: { API_KEY: 'already-here' },
       writer,
       prompter: { confirm: () => Promise.resolve(true) },
-      reporter: { info: (m) => lines.push(m), success: (m) => lines.push(m) },
+      reporter: {
+        info: (m) => lines.push(m),
+        success: (m) => lines.push(m),
+        warn: (m) => lines.push(m),
+      },
     });
     expect(result).toEqual({ added: ['GITHUB_TOKEN'], alreadySet: ['API_KEY'], declined: false });
     expect(written).toEqual([{ GITHUB_TOKEN: 'ghp_secret' }]);
@@ -278,10 +313,76 @@ describe('restoring values on pull', () => {
       env: {},
       writer,
       prompter: { confirm: () => Promise.resolve(false) },
-      reporter: { info: () => undefined, success: () => undefined },
+      reporter: { info: () => undefined, success: () => undefined, warn: () => undefined },
     });
     expect(result.declined).toBe(true);
     expect(written).toEqual([]);
+  });
+
+  describe('variables that make programs run code (T44)', () => {
+    const loaders = {
+      variables: { API_KEY: 'key-1', NODE_OPTIONS: '--require /tmp/x.js', PROMPT_COMMAND: 'x' },
+    };
+    const quiet = () => {
+      const lines: string[] = [];
+      const push = (m: string) => lines.push(m);
+      return { lines, reporter: { info: push, success: push, warn: push } };
+    };
+
+    it('--yes adds the others but never these, and says how to accept them', async () => {
+      const { writer, written } = recordingWriter();
+      const { lines, reporter } = quiet();
+      const result = await restoreEnvValues({
+        section: loaders,
+        env: {},
+        writer,
+        prompter: { confirm: () => Promise.reject(new Error('must not ask')) },
+        reporter,
+        assumeYes: true,
+      });
+      expect(written).toEqual([{ API_KEY: 'key-1' }]);
+      expect(result.added).toEqual(['API_KEY']);
+      expect(lines.join('\n')).toContain('--allow-commands');
+      expect(lines.join('\n')).not.toContain('/tmp/x.js');
+    });
+
+    it('--allow-commands adds them too', async () => {
+      const { writer, written } = recordingWriter();
+      await restoreEnvValues({
+        section: loaders,
+        env: {},
+        writer,
+        prompter: { confirm: () => Promise.reject(new Error('must not ask')) },
+        reporter: quiet().reporter,
+        assumeYes: true,
+        allowCommands: true,
+      });
+      expect(written).toEqual([
+        { API_KEY: 'key-1', NODE_OPTIONS: '--require /tmp/x.js', PROMPT_COMMAND: 'x' },
+      ]);
+    });
+
+    it('asks about them separately, defaulting to no', async () => {
+      const { writer, written } = recordingWriter();
+      const asked: [string, boolean | undefined][] = [];
+      await restoreEnvValues({
+        section: loaders,
+        env: {},
+        writer,
+        prompter: {
+          confirm: (message, initial) => {
+            asked.push([message, initial]);
+            return Promise.resolve(initial ?? false);
+          },
+        },
+        reporter: quiet().reporter,
+      });
+      expect(asked).toEqual([
+        ['Add 1 variable?', true],
+        ['NODE_OPTIONS, PROMPT_COMMAND make programs load or run code. Add them too?', false],
+      ]);
+      expect(written).toEqual([{ API_KEY: 'key-1' }]);
+    });
   });
 });
 

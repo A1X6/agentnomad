@@ -1,6 +1,6 @@
 {
   "name": "@agentnomad/cli",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "agentnomad command-line interface: commands, prompts, file system, API client, agent adapters",
   "license": "MIT",

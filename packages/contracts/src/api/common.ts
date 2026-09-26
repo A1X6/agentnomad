@@ -7,6 +7,19 @@ export const AUTH_KEY_BYTES = 32;
 export const WRAPPED_DATA_KEY_BYTES = 72;
 /** Largest encrypted project name accepted (nonce + up to 400 bytes of name + tag). */
 export const MAX_NAME_ENC_BYTES = 512;
+/**
+ * The message of the 401 that DELETE /account sends for a wrong password, so the CLI can
+ * tell it from an ended session (T46). Part of the API: 1.0 CLIs know only the `unauthorized`
+ * code, so a new code would break them.
+ */
+export const WRONG_PASSWORD_MESSAGE = 'Wrong password';
+
+/**
+ * What one account may keep (T47), so a single account cannot fill the database that every
+ * user shares: saved setups, and their encrypted bytes together.
+ */
+export const USER_STORAGE_LIMITS = { maxSetups: 100, maxBytes: 50 * 1024 * 1024 } as const;
+
 /** Largest encrypted bundle accepted by PUT /bundles. */
 export const MAX_BUNDLE_BYTES = 5 * 1024 * 1024;
 
@@ -58,7 +71,8 @@ export const ErrorCodeSchema = z.enum([
 export const ErrorResponseSchema = z.strictObject({
   error: z.strictObject({
     code: ErrorCodeSchema,
-    message: z.string(),
+    /** Short by design: shown to the user, so a server cannot flood the terminal (T44). */
+    message: z.string().max(1000),
     /** Set on `revision_conflict` so the CLI can tell the user a newer copy exists. */
     currentRevision: z.int().min(1).optional(),
   }),

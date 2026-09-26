@@ -6,8 +6,8 @@ import { commandsInSettings, commandWords } from './file-gathering.ts';
 import {
   NEVER_SYNCED,
   HOME_SCRIPTS_PREFIX,
+  homePathProblem,
   SCRIPT_EXTENSIONS,
-  SENSITIVE_HOME_DIRS,
 } from './global-paths.ts';
 
 export interface HookScriptContext {
@@ -29,7 +29,8 @@ const under = (path: string, folder: string) => path === folder || path.startsWi
 /**
  * The scripts that the hooks and status line in a global `settings.json` run (T25), as push
  * collects them and pull allows them back (T38): script files in the base folder (not never-
- * synced ones) or elsewhere in the home folder (never in folders for keys and logins).
+ * synced ones) or elsewhere in the home folder (never in folders for keys and logins, nor
+ * in ones whose files run by themselves, T43).
  * Push saves only these; pull writes a home-folder file only when it is one of these, so a
  * bundle cannot place other files that run by themselves (a Startup folder, a shell profile).
  */
@@ -61,10 +62,7 @@ export function hookScripts(settingsJson: string, context: HookScriptContext): H
       if (inBase !== null) {
         if (NEVER_SYNCED.some((entry) => under(inBase, entry))) continue;
         bundlePath = inBase;
-      } else if (
-        inHome !== null &&
-        !SENSITIVE_HOME_DIRS.some((dir) => under(inHome.toLowerCase(), dir.toLowerCase()))
-      ) {
+      } else if (inHome !== null && homePathProblem(inHome) === null) {
         bundlePath = HOME_SCRIPTS_PREFIX + inHome;
       } else {
         continue;

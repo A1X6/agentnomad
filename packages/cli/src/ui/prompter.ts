@@ -40,6 +40,11 @@ export interface Prompter {
   /** Input is hidden while typing; a rejected answer is cleared and asked again. */
   password(message: string, options?: PasswordOptions): Promise<string>;
   confirm(message: string, initial?: boolean): Promise<boolean>;
+  /**
+   * `false` when nothing can be asked (no terminal, T36): commands then check for every
+   * question the flags leave open before they change anything (T46).
+   */
+  readonly canAsk?: boolean;
 }
 
 /** The user cancelled a question (Ctrl+C or Esc); the command stops without changing anything. */

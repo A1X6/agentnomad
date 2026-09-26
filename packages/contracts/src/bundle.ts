@@ -22,13 +22,29 @@ export const AgentVersionSchema = z
 /** OS the bundle was pushed from, as reported by Node's `process.platform`. */
 export const SourceOsSchema = z.enum(['darwin', 'linux', 'win32']);
 
+/** Bytes `text` takes as UTF-8. */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
 /** User-given project name, e.g. `my-saas-app`. Encrypted before it leaves the PC. */
 export const ProjectNameSchema = z
   .string()
   .min(1)
   .max(100)
   .refine((name) => name === name.trim(), 'Project name must not start or end with spaces')
-  .refine((name) => !hasControlCharacter(name), 'Project name must not contain control characters');
+  .refine((name) => !hasControlCharacter(name), 'Project name must not contain control characters')
+  // The name is stored NFC-normalised, which can make it longer (T45): the stored form must
+  // fit too, so it can always be read back and its encrypted form stays within the API limit.
+  .refine((name) => {
+    const stored = name.normalize('NFC');
+    return stored.length <= 100 && utf8Length(stored) <= 400;
+  }, 'Project name is too long');
 
 export const BundleScopeSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('global') }),

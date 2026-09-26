@@ -108,6 +108,14 @@ export function changelogSince(markdown: string, afterVersion: string): Changelo
   return sections.sort((a, b) => compareVersions(b.version, a.version));
 }
 
+/**
+ * A changelog line as it is shown in the issue (T48): text from outside the repository, so an
+ * @mention cannot notify anyone and an image cannot load from elsewhere.
+ */
+export function inert(line: string): string {
+  return line.replace(/@(?=[A-Za-z0-9])/g, '@\u200b').replace(/!\[/g, '!\\[');
+}
+
 export function driftReport(input: DriftInput): DriftReport {
   const known = knownTopLevelNames(input.paths);
   const unknownInDocs = docsTopLevelNames(input.directoryDocs).filter((name) => !known.has(name));
@@ -151,7 +159,9 @@ export function reportMarkdown(report: DriftReport, runUrl?: string): string {
     parts.push(
       '## Changelog entries to review',
       'Entries that may change where Claude Code keeps things ([CHANGELOG](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)):',
-      ...report.changelog.map((section) => `### ${section.version}\n${section.lines.join('\n')}`),
+      ...report.changelog.map(
+        (section) => `### ${section.version}\n${section.lines.map(inert).join('\n')}`,
+      ),
     );
   }
   if (report.hasFindings) {

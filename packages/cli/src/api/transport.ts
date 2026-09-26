@@ -46,6 +46,11 @@ export interface TransportResponse {
   readonly body: Uint8Array;
   /** Which attempt produced this answer (1 = first try). */
   readonly attempts: number;
+  /**
+   * An earlier attempt got no answer (network error or timeout), so the server may have
+   * done it already. A 502/503/504 before means it did not (T46).
+   */
+  readonly lostAnswer: boolean;
 }
 
 export interface TransportDeps {
@@ -138,6 +143,7 @@ export function createTransport(deps: TransportDeps): Transport {
       const body = request.body instanceof Uint8Array ? new Uint8Array(request.body) : request.body;
       const attempts = request.retry ? deps.retryPolicy.attempts : 1;
 
+      let lostAnswer = false;
       for (let attempt = 1; ; attempt++) {
         const last = attempt >= attempts;
         let waitMs = backoffDelay(attempt, deps.retryPolicy, deps.random);
@@ -162,11 +168,13 @@ export function createTransport(deps: TransportDeps): Transport {
               headers: response.headers,
               body: await readCapped(response, deps.maxResponseBytes),
               attempts: attempt,
+              lostAnswer,
             };
           }
         } catch (error) {
           if (error instanceof InvalidResponseError) throw error;
           if (last) throw toNetworkError(error);
+          lostAnswer = true;
         }
         await deps.sleep(waitMs);
       }

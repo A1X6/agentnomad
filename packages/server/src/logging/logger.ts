@@ -27,10 +27,25 @@ export function createJsonLogger(
   };
 }
 
-/** What an unexpected error may put in the logs: its type and message, never extra data. */
+/**
+ * What an unexpected error may put in the logs: its type and message, never extra data. A
+ * failed database query (Drizzle's DrizzleQueryError) carries every query parameter in its
+ * message and stack, which can be a user's auth hash or a whole encrypted bundle (T47): only
+ * its SQL text is logged, which holds placeholders, and the database's own error below it.
+ */
 export function describeError(error: unknown): LogFields {
-  if (error instanceof Error) {
-    return { errorName: error.name, errorMessage: error.message, stack: error.stack };
+  if (!(error instanceof Error)) return { errorName: typeof error };
+  if ('query' in error && typeof error.query === 'string' && 'params' in error) {
+    const cause = error.cause instanceof Error ? error.cause : undefined;
+    return {
+      errorName: error.name,
+      query: error.query,
+      ...(cause && {
+        causeName: cause.name,
+        causeMessage: cause.message,
+        ...('code' in cause && typeof cause.code === 'string' && { causeCode: cause.code }),
+      }),
+    };
   }
-  return { errorName: typeof error };
+  return { errorName: error.name, errorMessage: error.message, stack: error.stack };
 }

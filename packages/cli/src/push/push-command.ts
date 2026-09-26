@@ -27,6 +27,8 @@ import { scanEnvReferences } from '../env/env-references.ts';
 import { chooseEnvValues, envSectionFile } from '../env/env-section.ts';
 import type { SecretStore } from '../secrets/secret-store.ts';
 import type { LocalState } from '../state/local-state.ts';
+import { listSavedRevisions } from '../pull/saved-setups.ts';
+import { AnswerNeededError } from '../ui/no-terminal-prompter.ts';
 import type { Prompter, Reporter } from '../ui/prompter.ts';
 import { toBundleFiles } from './bundle-files.ts';
 
@@ -183,6 +185,7 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
     seal: (revision: number) => Promise<Sealed>,
     nameEnc: string | undefined,
     options: PushOptions,
+    beforeAsking: () => void = () => undefined,
   ): Promise<number | null> {
     const api = deps.api();
     const params = { agent: item.adapter.id, scopeKey };
@@ -207,6 +210,8 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
         current === undefined
           ? `The saved ${describe(item)} was deleted since this PC last had it. Save it again?`
           : `A newer copy of the ${describe(item)} (revision ${String(current)}) was saved from another PC. Replace it with this PC's setup?`;
+      // A question drawn over a running spinner is garbled (T46).
+      beforeAsking();
       if (options.yes || !(await prompter.confirm(question, false))) {
         reporter.warn(
           `Skipped the ${describe(item)}: ${current === undefined ? 'it was deleted on the server' : 'a newer copy exists'}. Run \`agentnomad pull\` first to keep its changes.`,
@@ -214,6 +219,35 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
         return null;
       }
       return (await put(current ?? 0)).revision;
+    }
+  }
+
+  /**
+   * Without a terminal and without --yes (T46): a setup the server has in another revision
+   * than this PC knows, or one whose last pull here left out declined commands, would need
+   * an answer while uploading. Found before anything is saved.
+   */
+  async function checkAnswerable(
+    ready: readonly { item: PushItem; scopeKey: string }[],
+    secrets: SecretStore,
+  ): Promise<void> {
+    const saved = await withSession(secrets, () => listSavedRevisions(deps.api()));
+    for (const { item, scopeKey } of ready) {
+      const state = deps.localState();
+      const known = await state.revisionOf(item.adapter.id, scopeKey);
+      const onServer = saved.get(`${item.adapter.id}/${scopeKey}`);
+      if ((onServer ?? null) !== known) {
+        throw new AnswerNeededError(
+          onServer === undefined
+            ? `The saved ${describe(item)} was deleted since this PC last had it. Save it again?`
+            : `A newer copy of the ${describe(item)} was saved from another PC. Replace it?`,
+        );
+      }
+      if (await state.isPartial(item.adapter.id, scopeKey)) {
+        throw new AnswerNeededError(
+          `This PC's last pull of the ${describe(item)} left out commands you declined. Push anyway?`,
+        );
+      }
     }
   }
 
@@ -295,13 +329,21 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
       const crypto = await deps.crypto();
       const resolver = createPathResolver({ os: sourceOsOf(deps.platform), homeDir: deps.homedir });
       try {
+        // First collect every setup and ask everything, then upload (T46): a question left
+        // open without a terminal stops push before anything is saved.
+        const ready: { item: PushItem; bundle: Omit<Bundle, 'revision'>; scopeKey: string }[] = [];
         for (const item of items) {
+          const leftOut: string[] = [];
           const collected: CollectedFile[] = [
             ...(await item.adapter.collector.collect(item.target, {
               includeMemory,
               includeAccountSkills: includeAccountSkills && item.scope.kind === 'global',
+              onSkipped: (path, reason) => leftOut.push(`  - ${path}: ${reason}`),
             })),
           ];
+          if (leftOut.length > 0) {
+            reporter.warn([`${describe(item)}: left out`, ...leftOut].join('\n'));
+          }
           const unknown = unknownEntriesNotice(
             (await item.adapter.inspector?.unknownEntries(item.target)) ?? [],
           );
@@ -328,12 +370,32 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
             agentVersion: item.version,
             files: toBundleFiles(collected, resolver),
           };
+          ready.push({ item, bundle, scopeKey: scopeKeyFor(crypto, dataKey, item.scope) });
+        }
+        if (prompter.canAsk === false && !options.yes) await checkAnswerable(ready, secrets);
+
+        for (const { item, bundle, scopeKey } of ready) {
+          // A pull that left out commands the user declined (T46): this PC's copy lacks them,
+          // so replacing the saved one would drop them for every PC.
+          if (await deps.localState().isPartial(item.adapter.id, scopeKey)) {
+            const question = `This PC's last pull of the ${describe(item)} left out commands you declined, so pushing now removes them from the saved copy (and from your other PCs on their next pull). Push anyway?`;
+            if (options.yes || !(await prompter.confirm(question, false))) {
+              reporter.warn(
+                `Skipped the ${describe(item)}: its last pull here left out commands you declined. Pull it with --allow-commands (or answer yes) first, or push without --yes to choose.`,
+              );
+              continue;
+            }
+          }
           const spinner = reporter.spinner();
           spinner.start(`Encrypting and uploading the ${describe(item)}…`);
           let revision: number | null;
           let size: number;
+          let spinning = true;
+          const stopSpinner = () => {
+            if (spinning) spinner.stop();
+            spinning = false;
+          };
           try {
-            const scopeKey = scopeKeyFor(crypto, dataKey, item.scope);
             const seal = async (revision: number): Promise<Sealed> => {
               const ciphertext = sealBundle(
                 crypto,
@@ -348,7 +410,7 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
             const sealed = await seal(expectedRevision + 1);
             size = sealed.ciphertext.byteLength;
             if (size > MAX_BUNDLE_BYTES) {
-              spinner.stop();
+              stopSpinner();
               reporter.error(
                 `The ${describe(item)} is ${sizeOf(size)} after compression and encryption; the limit is 5 MB. Remove large files (e.g. images in skills) and try again.`,
               );
@@ -371,11 +433,12 @@ export function createPushCommand(deps: PushDeps): Pick<CommandHandlers, 'push'>
               seal,
               nameEnc,
               options,
+              stopSpinner,
             );
             if (revision !== null)
               await deps.localState().setRevision(item.adapter.id, scopeKey, revision);
           } finally {
-            spinner.stop();
+            stopSpinner();
           }
           if (revision !== null) {
             const count = bundle.files.length;

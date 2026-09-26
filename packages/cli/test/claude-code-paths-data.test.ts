@@ -64,6 +64,24 @@ describe('unknown-file check (T32 done-when)', () => {
     ]);
   });
 
+  it('does not report a folder whose script a hook or the status line runs (T49)', async () => {
+    const home = dirname(base);
+    await put(join(base, 'hooks', 'check.sh'));
+    await put(join(base, 'bin', 'status.sh'));
+    await put(join(base, 'tools', 'unused.sh'));
+    await writeFile(
+      join(base, 'settings.json'),
+      JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: '~/.claude/hooks/check.sh' }] }] },
+        statusLine: { type: 'command', command: 'bash ~/.claude/bin/status.sh' },
+      }),
+    );
+    // push saves hooks/check.sh and bin/status.sh; nothing in tools/ is saved.
+    expect(await findUnknownEntries({ kind: 'global' }, { ...input(), homedir: home })).toEqual([
+      'tools/',
+    ]);
+  });
+
   it('does not report skills/synced/, secrets, state or known copies', async () => {
     await put(join(base, 'skills', 'synced', 'x', 'SKILL.md'));
     await put(join(base, '.credentials.json'));

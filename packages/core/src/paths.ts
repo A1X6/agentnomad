@@ -32,8 +32,22 @@ export interface PathResolver {
   toNativePath(baseDir: string, bundlePath: string): string;
   /** Absolute OS path under `baseDir` to a bundle path. Throws if the path is outside `baseDir`. */
   toBundlePath(baseDir: string, nativePath: string): string;
-  /** Replaces this machine's home folder in text with `{{HOME}}` (on push). */
+  /**
+   * Replaces this machine's home folder in text with `{{HOME}}` (on push). A `{{HOME}}`
+   * already in the text is kept as written (T45): it is stored as `{{HOME\}}`.
+   */
   toPortableText(text: string): string;
-  /** Replaces `{{HOME}}` in text with this machine's home folder (on pull). */
-  fromPortableText(text: string): string;
+  /**
+   * Replaces `{{HOME}}` in text with this machine's home folder (on pull), and gives back
+   * a `{{HOME}}` the text held as written.
+   */
+  fromPortableText(text: string, options?: PortableTextOptions): string;
+}
+
+export interface PortableTextOptions {
+  /**
+   * On Windows, write the home folder and the path after it with backslashes: batch files
+   * read `C:/Users/a/bin` as a switch (T45). Other files keep forward slashes.
+   */
+  readonly backslashes?: boolean;
 }

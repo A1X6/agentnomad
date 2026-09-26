@@ -88,7 +88,8 @@ When testing by hand, use a temporary home folder (set `HOME` and, on Windows,
 - Anything that touches paths runs on macOS, Linux and Windows in CI; write it so it passes
   on all three (use `path.join`, never assume `/`).
 - A change to push, pull or the bundle belongs in the end-to-end steps too
-  (`packages/e2e/src/steps.ts`), including the check that nothing readable leaves the PC.
+  (`packages/e2e/src/steps.ts`), including the check that nothing readable leaves the PC
+  (`packages/e2e/src/plaintext.ts`: as text, encoded or compressed).
 
 ## Pull requests
 

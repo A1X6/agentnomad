@@ -11,15 +11,18 @@ import {
 } from '@agentnomad/contracts';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { createMiddleware } from 'hono/factory';
 
 import type { AuthService } from '../../auth/auth-service.ts';
 import {
   BundleNotFoundError,
+  StorageLimitError,
   InvalidUploadError,
   type BundleService,
 } from '../../bundles/bundle-service.ts';
 import { InvalidCursorError, type BundleKey, type BundleMeta } from '../../db/repositories.ts';
 import { fromBase64, fromHex, toBase64, toHex } from '../../encoding.ts';
+import { RATE_LIMITS, RateLimitedError, type RateLimiter } from '../../rate-limit/rate-limiter.ts';
 import { ApiError } from '../errors.ts';
 import { requireSession, type SessionVariables } from '../session.ts';
 import { validHeaders, validParams, validQuery } from '../validate.ts';
@@ -49,6 +52,10 @@ function toApiError(error: unknown): unknown {
   if (error instanceof BundleNotFoundError) {
     return new ApiError(404, 'not_found', error.message);
   }
+  // An existing code, so 1.0 CLIs understand it; the message says which limit (T47).
+  if (error instanceof StorageLimitError) {
+    return new ApiError(413, 'payload_too_large', error.message);
+  }
   if (error instanceof InvalidUploadError || error instanceof InvalidCursorError) {
     return new ApiError(400, 'bad_request', error.message);
   }
@@ -59,9 +66,16 @@ function toApiError(error: unknown): unknown {
 export function bundleRoutes(
   auth: AuthService,
   service: BundleService,
+  limiter: RateLimiter,
 ): Hono<{ Variables: SessionVariables }> {
   const routes = new Hono<{ Variables: SessionVariables }>();
   routes.use(API_ROUTES.bundles, requireSession(auth));
+  /** Saves and deletes per account (T47); runs after the session check, before the body. */
+  const writeLimit = createMiddleware<{ Variables: SessionVariables }>(async (c, next) => {
+    const status = await limiter.hit(RATE_LIMITS.writesPerAccount, c.get('session').userId);
+    if (!status.allowed) throw new RateLimitedError(status.retryAfterSeconds);
+    await next();
+  });
   routes.use(`${API_ROUTES.bundles}/*`, requireSession(auth));
 
   return routes
@@ -101,6 +115,7 @@ export function bundleRoutes(
 
     .put(
       bundlePath,
+      writeLimit,
       // Raw bytes, never base64 JSON, so 5 MB is the real limit. Checked from
       // Content-Length or while streaming, before the body is buffered.
       bodyLimit({
@@ -148,7 +163,7 @@ export function bundleRoutes(
       },
     )
 
-    .delete(bundlePath, validParams(BundleParamsSchema), async (c) => {
+    .delete(bundlePath, writeLimit, validParams(BundleParamsSchema), async (c) => {
       const key = keyFor(c.get('session').userId, c.req.valid('param'));
       await service.delete(key).catch((error: unknown) => {
         throw toApiError(error);

@@ -1,5 +1,6 @@
-import { GLOBAL_SCOPE_KEY } from '@agentnomad/contracts';
+import { GLOBAL_SCOPE_KEY, USER_STORAGE_LIMITS } from '@agentnomad/contracts';
 
+import { overLimit } from '../db/bundle-repository.ts';
 import type { BundleKey, BundleMeta, BundlePage, BundleRepository } from '../db/repositories.ts';
 import type { BlobStore } from '../storage/blob-store.ts';
 
@@ -11,6 +12,14 @@ export class InvalidUploadError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidUploadError';
+  }
+}
+
+/** Saving would take the account past its storage limits (T47); the message says which. */
+export class StorageLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StorageLimitError';
   }
 }
 
@@ -52,7 +61,7 @@ export interface BundleService {
   ): Promise<BundlePage>;
   /** Throws BundleNotFoundError. */
   download(key: BundleKey): Promise<DownloadedBundle>;
-  /** Throws InvalidUploadError. */
+  /** Throws InvalidUploadError, or StorageLimitError (T47). */
   upload(input: BundleUploadInput): Promise<UploadResult>;
   /** Throws BundleNotFoundError. */
   delete(key: BundleKey): Promise<void>;
@@ -63,7 +72,15 @@ export interface BundleServiceDeps {
   readonly blobs: BlobStore;
   /** Reports cleanup failures; the request itself still succeeds. */
   readonly logError: (message: string, error: unknown) => void;
+  /**
+   * Whether this save also sweeps files no setup points to (T47); about one save in 50 by
+   * default, so the work is spread thin. Injectable for tests.
+   */
+  readonly shouldSweep?: () => boolean;
 }
+
+/** Files left unused for this long are swept: far longer than any upload takes. */
+const ORPHAN_AGE_SECONDS = 60 * 60;
 
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
@@ -75,6 +92,15 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 
 export function createBundleService(deps: BundleServiceDeps): BundleService {
   const { bundles, blobs, logError } = deps;
+  const shouldSweep = deps.shouldSweep ?? (() => Math.random() < 0.02);
+
+  async function sweepQuietly(): Promise<void> {
+    try {
+      await blobs.deleteOrphans?.(ORPHAN_AGE_SECONDS);
+    } catch (error) {
+      logError('Could not sweep unused bundle files', error);
+    }
+  }
 
   /** A failed cleanup only leaves an unused file behind; never fail the request for it. */
   async function deleteQuietly(userId: string, blobId: string): Promise<void> {
@@ -117,8 +143,20 @@ export function createBundleService(deps: BundleServiceDeps): BundleService {
         throw new InvalidUploadError('Content hash does not match the uploaded bytes');
       }
 
-      // 1. Store the bytes under a new random id; the current copy is untouched.
+      // 0. Over the account's limits already: refuse before storing anything (T47). The
+      // same check runs again inside the save, where it cannot be raced.
       const { userId } = input.key;
+      const used = await bundles.usage(userId);
+      const current = await bundles.get(input.key);
+      if (!current && used.setups >= USER_STORAGE_LIMITS.maxSetups) {
+        throw new StorageLimitError(overLimit('setups'));
+      }
+      const growth = input.ciphertext.length - (current?.sizeBytes ?? 0);
+      if (growth > 0 && used.bytes + growth > USER_STORAGE_LIMITS.maxBytes) {
+        throw new StorageLimitError(overLimit('bytes'));
+      }
+
+      // 1. Store the bytes under a new random id; the current copy is untouched.
       const uploaded = await blobs.put(userId, input.ciphertext);
 
       let result;
@@ -142,6 +180,7 @@ export function createBundleService(deps: BundleServiceDeps): BundleService {
       switch (result.outcome) {
         case 'saved':
           if (result.replacedBlobId) await deleteQuietly(userId, result.replacedBlobId);
+          if (shouldSweep()) await sweepQuietly();
           return { outcome: 'stored', meta: result.meta };
         case 'unchanged':
           await deleteQuietly(userId, uploaded.blobId);
@@ -149,6 +188,9 @@ export function createBundleService(deps: BundleServiceDeps): BundleService {
         case 'conflict':
           await deleteQuietly(userId, uploaded.blobId);
           return { outcome: 'conflict', currentRevision: result.currentRevision };
+        case 'over-limit':
+          await deleteQuietly(userId, uploaded.blobId);
+          throw new StorageLimitError(result.reason);
       }
     },
 

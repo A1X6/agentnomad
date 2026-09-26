@@ -48,7 +48,8 @@ jobs:
         id: install
         run: |
           npm install -g @anthropic-ai/claude-code@latest
-          version="$(npm view @anthropic-ai/claude-code version)"
+          # The version that was installed and is run below, not a second registry lookup (T48).
+          version="$(npm ls -g --depth=0 --json @anthropic-ai/claude-code | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).dependencies['@anthropic-ai/claude-code'].version")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Claude Code $version"
 
@@ -81,6 +82,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -107,6 +110,7 @@ jobs:
           DRIFT_LATEST: ${{ needs.fresh-install.outputs.version }}
           DRIFT_FRESH_ENTRIES: ${{ runner.temp }}/fresh-entries.txt
           DRIFT_OUT: ${{ runner.temp }}/report.md
+          DRIFT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node --experimental-strip-types packages/cli/scripts/drift/check-claude-code.ts
 
       # One open issue at a time: created once, then updated (with a comment) only when the

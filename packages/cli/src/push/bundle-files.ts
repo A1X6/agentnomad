@@ -55,7 +55,12 @@ export function fromBundleFiles(
     executable: file.executable,
     content:
       file.encoding === 'utf8'
-        ? new TextEncoder().encode(resolver.fromPortableText(file.content))
+        ? new TextEncoder().encode(
+            resolver.fromPortableText(file.content, {
+              // Batch files read `C:/Users/a/bin` as a switch (T45).
+              backslashes: /\.(bat|cmd)$/i.test(file.path),
+            }),
+          )
         : new Uint8Array(Buffer.from(file.content, 'base64')),
   }));
 }

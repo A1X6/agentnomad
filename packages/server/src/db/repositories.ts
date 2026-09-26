@@ -119,7 +119,9 @@ export type PutMetaResult =
    */
   | { readonly outcome: 'unchanged'; readonly meta: BundleMeta }
   /** Someone saved a newer revision first. Nothing changed; delete the new file. */
-  | { readonly outcome: 'conflict'; readonly currentRevision: number };
+  | { readonly outcome: 'conflict'; readonly currentRevision: number }
+  /** Saving it would take the account past its storage limits (T47). Nothing changed. */
+  | { readonly outcome: 'over-limit'; readonly reason: string };
 
 export interface BundlePage {
   readonly items: readonly BundleMeta[];
@@ -137,7 +139,13 @@ export interface BundleRepository {
     page: { readonly cursor?: string; readonly limit: number },
   ): Promise<BundlePage>;
   get(key: BundleKey): Promise<BundleMeta | null>;
+  /**
+   * Saves the metadata of a new revision. Checked in the same transaction: the revision
+   * and the account's storage limits (T47).
+   */
   putMeta(write: BundleMetaWrite): Promise<PutMetaResult>;
+  /** How many setups the user keeps and their encrypted bytes together (T47). */
+  usage(userId: string): Promise<{ readonly setups: number; readonly bytes: number }>;
   /** Returns what was removed (so its file can be deleted next), or `null` if nothing was. */
   delete(key: BundleKey): Promise<BundleMeta | null>;
 }

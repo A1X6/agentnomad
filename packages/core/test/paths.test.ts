@@ -49,6 +49,12 @@ describe('toNativePath: bundle path to a real path on each OS', () => {
     'less<.md',
     'trailing.',
     'trailing ',
+    // Microsoft's naming rules also reserve the superscript forms (T43).
+    'COM¹.md',
+    'skills/lpt³',
+    // 8.3 short names reach a folder under another name (T43).
+    'PROGRA~1/x.md',
+    'SSH~1',
   ])('refuses %j on Windows only', (path) => {
     expect(() => onWin.toNativePath('C:\\base', path)).toThrow(/Windows/);
     expect(onLinux.toNativePath('/base', path)).toBe(`/base/${path}`);
@@ -159,6 +165,39 @@ describe('fromPortableText: {{HOME}} to this home folder (on pull)', () => {
   });
 });
 
+describe('a {{HOME}} already in a file survives push and pull (T45)', () => {
+  it.each([
+    ['a template', 'Hello {{HOME}} and {{HOME}}/docs'],
+    ['a kept form', 'literal {{HOME\\}} and {{HOME\\\\}}'],
+  ])('%s', (_, text) => {
+    for (const from of [onLinux, onMac, onWin]) {
+      for (const to of [onLinux, onMac, onWin]) {
+        expect(to.fromPortableText(from.toPortableText(text))).toBe(text);
+      }
+    }
+  });
+
+  it('still swaps the real home folder next to a literal one', () => {
+    const text = 'see {{HOME}} in /home/ahmed/notes.md';
+    expect(onMac.fromPortableText(onLinux.toPortableText(text))).toBe(
+      'see {{HOME}} in /Users/ahmed/notes.md',
+    );
+  });
+});
+
+describe('batch files keep backslashes on Windows (T45)', () => {
+  it('restores the home folder and the path after it with backslashes', () => {
+    expect(onWin.fromPortableText('dir {{HOME}}/bin/tools', { backslashes: true })).toBe(
+      'dir C:\\Users\\ahmed\\bin\\tools',
+    );
+  });
+
+  it('other files and other OSes keep forward slashes', () => {
+    expect(onWin.fromPortableText('{{HOME}}/bin')).toBe('C:/Users/ahmed/bin');
+    expect(onLinux.fromPortableText('{{HOME}}/bin', { backslashes: true })).toBe('/home/ahmed/bin');
+  });
+});
+
 describe('every OS to every OS (push on one, pull on another)', () => {
   // How each OS writes the hook path natively, and how it should read after a pull there.
   const machines = [
@@ -202,6 +241,8 @@ describe('environment checks', () => {
   // A home of "/" would make every "/" in every file look like the home folder.
   it.each<PathEnvironment>([
     { os: 'linux', homeDir: '/' },
+    // Normalises to nothing, which would match between every two characters (T45).
+    { os: 'linux', homeDir: '//' },
     { os: 'darwin', homeDir: '' },
     { os: 'linux', homeDir: 'home/ahmed' },
     { os: 'win32', homeDir: 'C:\\' },

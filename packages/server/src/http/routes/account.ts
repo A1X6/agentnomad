@@ -1,4 +1,8 @@
-import { API_ROUTES, DeleteAccountRequestSchema } from '@agentnomad/contracts';
+import {
+  API_ROUTES,
+  DeleteAccountRequestSchema,
+  WRONG_PASSWORD_MESSAGE,
+} from '@agentnomad/contracts';
 import { Hono } from 'hono';
 
 import { InvalidCredentialsError, type AuthService } from '../../auth/auth-service.ts';
@@ -21,7 +25,7 @@ export function accountRoutes(auth: AuthService): Hono<{ Variables: SessionVaria
         await auth.deleteAccount(c.get('session').userId, fromBase64(authKey));
       } catch (error) {
         if (error instanceof InvalidCredentialsError) {
-          throw new ApiError(401, 'unauthorized', 'Wrong password');
+          throw new ApiError(401, 'unauthorized', WRONG_PASSWORD_MESSAGE);
         }
         throw error;
       }

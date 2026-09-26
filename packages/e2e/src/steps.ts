@@ -5,7 +5,7 @@ import { createClaudeRunningCheck, projectDirName } from '@agentnomad/cli';
 import { expect } from 'vitest';
 
 import type { LocalServer } from './local-server.ts';
-import { plaintextLeaks } from './plaintext.ts';
+import { looksCompressedOnly, plaintextLeaks } from './plaintext.ts';
 import { forward, isExecutable, newPc, read, write, type Pc, type RunResult } from './pc.ts';
 
 /** A throwaway account on the throwaway local server; strong enough for the T23 policy. */
@@ -47,9 +47,14 @@ const claudeRunningHere = await createClaudeRunningCheck()();
  * body) is searched for the password, file contents, commands, memory, the project name and
  * the login state in `~/.claude.json`. Only the username and device name are sent readable.
  */
-function expectNothingReadable(server: LocalServer): void {
+function expectNothingReadable(server: LocalServer, known: Known): void {
   expect(server.requests.length).toBeGreaterThan(0);
+  const dataKey = known.dataKey;
   const secrets = [
+    // T48: what only this PC may know, and where it keeps it.
+    dataKey,
+    Buffer.from(dataKey, 'base64').toString('hex'),
+    ...known.homes.flatMap((home) => [home, forward(home)]),
     PASSWORD,
     'Notes live in',
     'Deploy the app',
@@ -69,8 +74,32 @@ function expectNothingReadable(server: LocalServer): void {
     'demo',
   ];
   expect(plaintextLeaks(server.requests, secrets)).toEqual([]);
+  // A session token goes only in the Authorization header.
+  expect(plaintextLeaks(server.requests, known.tokens, 'authorization')).toEqual([]);
+  // Every upload is encrypted, not just compressed (T48).
+  for (const upload of server.requests.filter((request) => request.method === 'PUT')) {
+    expect(looksCompressedOnly(upload.body)).toBe(false);
+  }
   // Control: the username is sent readable (register, login), so the search does see bodies.
   expect(plaintextLeaks(server.requests, [USERNAME])).toEqual([USERNAME]);
+}
+
+/** What only the PCs of a step know, gathered while they are logged in (T48). */
+interface Known {
+  dataKey: string;
+  tokens: string[];
+  homes: string[];
+}
+
+async function known(...pcs: Pc[]): Promise<Known> {
+  const dataKey = await pcs[0]?.secret('data-key');
+  if (!dataKey) throw new Error('The PC is not logged in: no data key to look for.');
+  const tokens: string[] = [];
+  for (const pc of pcs) {
+    const token = await pc.secret('session-token');
+    if (token) tokens.push(token);
+  }
+  return { dataKey, tokens, homes: pcs.map((pc) => pc.home) };
 }
 
 /** Exit 0, or a failure that shows what the CLI printed. */
@@ -166,6 +195,7 @@ export async function firstPc({ server, keychain }: StepContext): Promise<void> 
     await write(synced('pdf', 'SKILL.md'), '---\nname: pdf\n---\nAnthropic.\n');
 
     ok(await pc.run(['register', ...LOGIN, '--yes'], stdin));
+    const secretsHere = await known(pc);
 
     // No terminal and not enough flags: stops before changing anything, naming the flags.
     const unanswered = await pc.run(['push']);
@@ -187,6 +217,8 @@ export async function firstPc({ server, keychain }: StepContext): Promise<void> 
     );
     expect(pushed.stdout).toContain('Saved the Claude Code global setup');
     expect(pushed.stdout).toContain('Saved the Claude Code project "demo"');
+    // T49: a normal setup gets no false "not saved" warning (its hook script is saved).
+    expect(pushed.stderr).not.toContain('Not saved, because agentnomad does not know');
 
     const status = ok(await pc.run(['status']));
     expect(status.stdout).toContain('Claude Code global setup: up to date (revision 1)');
@@ -196,7 +228,7 @@ export async function firstPc({ server, keychain }: StepContext): Promise<void> 
     const uploads = server.requests.filter((request) => request.method === 'PUT');
     expect(uploads.length).toBe(2);
     expect(uploads.every((request) => request.body.byteLength > 0)).toBe(true);
-    expectNothingReadable(server);
+    expectNothingReadable(server, secretsHere);
   } finally {
     await pc.remove();
   }
@@ -224,6 +256,7 @@ export async function secondPc({ server, keychain }: StepContext): Promise<void>
     expect(notLoggedIn.stderr).toContain('agentnomad login');
 
     ok(await pc.run(['login', ...LOGIN], stdin));
+    const secretsHere = await known(pc);
     const pulled = ok(
       await pc.run([
         'pull',
@@ -278,9 +311,10 @@ export async function secondPc({ server, keychain }: StepContext): Promise<void>
     await write(claude(pc, 'skills', 'review', 'SKILL.md'), REVIEW_SKILL);
     const pushed = ok(await pc.run(['push', '--global', '--yes']));
     expect(pushed.stdout).toContain('(revision 2)');
+    expect(pushed.stderr).not.toContain('Not saved, because agentnomad does not know');
     const status = ok(await pc.run(['status']));
     expect(status.stdout).toContain('Claude Code global setup: up to date (revision 2)');
-    expectNothingReadable(server);
+    expectNothingReadable(server, secretsHere);
   } finally {
     await pc.remove();
   }
@@ -324,6 +358,7 @@ export async function thirdPc({ server, keychain }: StepContext): Promise<void> 
     // A PC out of step: --yes never replaces the newer copy.
     await write(claude(stale, 'CLAUDE.md'), 'Stale notes.\n');
     ok(await stale.run(['login', ...LOGIN], stdin));
+    const secretsHere = await known(pc, stale);
     const skipped = ok(await stale.run(['push', '--global', '--yes']));
     expect(skipped.stderr).toContain('a newer copy exists. Run `agentnomad pull` first');
     const list = ok(await pc.run(['list']));
@@ -345,7 +380,7 @@ export async function thirdPc({ server, keychain }: StepContext): Promise<void> 
     for (const table of ['users', 'sessions', 'bundles', 'bundle_blobs'] as const) {
       expect(await server.count(table), table).toBe(0);
     }
-    expectNothingReadable(server);
+    expectNothingReadable(server, secretsHere);
   } finally {
     await Promise.all([pc.remove(), stale.remove()]);
   }

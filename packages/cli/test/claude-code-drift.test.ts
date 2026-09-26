@@ -5,6 +5,7 @@ import {
   docsTopLevelNames,
   driftReport,
   knownTopLevelNames,
+  inert,
   reportMarkdown,
 } from '../scripts/drift/drift.ts';
 import { CLAUDE_CODE_PATHS } from '../src/index.ts';
@@ -125,5 +126,14 @@ describe('drift check (T41): comparing with the data file', () => {
     });
     expect(report.hasFindings).toBe(false);
     expect(reportMarkdown(report)).toContain('No drift found.');
+  });
+});
+
+describe('drift check (T48): changelog text is shown inert', () => {
+  it('cannot mention anyone or load an image in the issue', () => {
+    const shown = inert('- Fixed @someone and ![x](https://tracker.example/p.png) in ~/.claude');
+    expect(shown).not.toMatch(/@[A-Za-z]/);
+    expect(shown).not.toContain('![');
+    expect(shown).toContain('~/.claude');
   });
 });
